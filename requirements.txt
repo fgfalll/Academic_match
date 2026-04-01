@@ -1,0 +1,4 @@
+requests
+scholarly
+fake-useragent
+pyinstaller
