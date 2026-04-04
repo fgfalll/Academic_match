@@ -694,12 +694,16 @@ class MonCouncilProApp:
         
         all_kws = set()
         banned_all = set()
+        def norm_kw(txt):
+            if not txt: return ""
+            return str(txt).lower().replace("'", "'").replace("`", "'").replace("'", "'").strip(string.punctuation + " ")
         for cid in cids:
             banned_all.update(self.all_candidates[cid].get('banned_keywords', []))
             for pid in self.all_candidates[cid]['papers_uuids']:
                 p = self.all_papers[pid]
                 if p['recent']:
-                    words = [w.strip().lower() for w in p.get('concepts', []) + p.get('author_keywords', [])]
+                    manual_kws = [norm_kw(w) for w in p.get('manual_keywords', '').split(',') if w.strip()]
+                    words = [norm_kw(w) for w in p.get('author_keywords', [])] + manual_kws
                     all_kws.update([w for w in words if w])
                     
         self.current_author_keywords = sorted(list(all_kws))
@@ -784,8 +788,11 @@ class MonCouncilProApp:
         self.refresh_kw_lists()
 
     def save_and_close_blacklist(self, top):
+        def norm_kw(txt):
+            if not txt: return ""
+            return str(txt).lower().replace("'", "'").replace("`", "'").replace("'", "'").strip(string.punctuation + " ")
         for cid in self.blacklist_cids:
-            self.all_candidates[cid]['banned_keywords'] = list(self.current_banned_keywords)
+            self.all_candidates[cid]['banned_keywords'] = [norm_kw(k) for k in self.current_banned_keywords]
         self.recalculate_all_scores()
         top.destroy()
         messagebox.showinfo("Збережено", "Слова виключено з аналізу.")
@@ -797,9 +804,13 @@ class MonCouncilProApp:
             return
         
         cids = [self.advice_cid_map[i] for i in sel]
+        def norm_kw(txt):
+            if not txt: return ""
+            return str(txt).lower().replace("'", "'").replace("`", "'").replace("'", "'").strip(string.punctuation + " ")
         banned_set = set()
         for cid in cids:
-            banned_set.update(self.all_candidates[cid].get('banned_keywords', []))
+            for b in self.all_candidates[cid].get('banned_keywords', []):
+                banned_set.add(norm_kw(b))
         
         all_kw_by_author = {}
         for cid in cids:
@@ -808,7 +819,16 @@ class MonCouncilProApp:
                 p = self.all_papers[pid]
                 if not p['recent']: continue
                 
-                words = [w.strip().lower() for w in p.get('concepts', []) + p.get('author_keywords', [])]
+                manual_kws = [norm_kw(w) for w in p.get('manual_keywords', '').split(',') if w.strip()]
+                matched_kws = []
+                md = p.get('matched_details', '')
+                if md:
+                    for part in md.split(','):
+                        part = part.strip()
+                        if part.startswith("'") and "' (" in part:
+                            kw = part.split("' (")[0].strip("'")
+                            if kw: matched_kws.append(norm_kw(kw))
+                words = [norm_kw(w) for w in p.get('author_keywords', [])] + manual_kws + matched_kws
                 words = [w for w in words if w and w not in banned_set]
                 auth_kws.extend(words)
             all_kw_by_author[cid] = auth_kws
@@ -844,20 +864,32 @@ class MonCouncilProApp:
                 report += "Спільних тем не знайдено.\n"
             report += "\n"
         
-        report += "Відсутні цільові терміни\n"
+        report += "Відсутні ключові слова\n"
         report += "-"*60 + "\n"
+        matched = []
+        missing = []
         if not self.target_keywords:
-            report += "Цільові терміни не задані.\n"
+            report += "Ключові слова не задані.\n"
         else:
-            all_used_set = set(aggregated_all)
-            target_set = set(self.target_keywords)
-            missing = target_set - all_used_set
-            matched = target_set.intersection(all_used_set)
+            matched = []
+            missing = []
+            for target_kw in self.target_keywords:
+                target_norm = norm_kw(target_kw)
+                pat = rf'(?u)(?<!\w){re.escape(target_norm)}(?!\w)'
+                found = False
+                for word in aggregated_all:
+                    if re.search(pat, word):
+                        found = True
+                        break
+                if found:
+                    matched.append(target_kw)
+                else:
+                    missing.append(target_kw)
             
-            report += f"Використано цільових тем: {len(matched)}\n"
+            report += f"Використано ключових слів: {len(matched)}\n"
             if matched: report += f"   > {', '.join(matched)}\n"
             
-            report += f"\nНе використано цільових тем: {len(missing)}\n"
+            report += f"\nНе використано ключових слів: {len(missing)}\n"
             if missing: report += f"   > {', '.join(missing)}\n"
             
             report += "\nПоради:\n"
