@@ -209,10 +209,12 @@ class MonCouncilProApp:
         
         self.pm = tk.Menu(self.root, tearoff=0)
         self.pm.add_command(label="Деталі", command=self.open_paper_details)
+        self.pm.add_command(label="Копіювати назву", command=self.copy_paper_title)
         self.pm.add_command(label="Редагувати ключові слова", command=self.open_manual_tags_dialog)
         self.pm.add_separator()
         self.pm.add_command(label="Видалити статтю", command=self.delete_selected_paper)
         self.tree_pap.bind("<Button-3>", lambda e: self.pm.tk_popup(e.x_root, e.y_root))
+        self.tree_pap.bind("<Control-c>", lambda e: self.copy_paper_title())
 
     def build_advice_tab(self):
         main_frame = ttk.Frame(self.tab_advice)
@@ -461,7 +463,7 @@ class MonCouncilProApp:
                 pd_item.update({'score': sc, 'matched_details': ", ".join(m), 'recent': (pd_item['year'] >= self.cutoff_year), 'cand_id': cand_id})
                 self.all_papers[u] = pd_item
 
-        self.root.after(0, self.refresh_all_tables); self.log("\nАналіз завершено"); self.root.after(0, lambda: self.run_btn.config(state='normal'))
+        self.root.after(0, self.notebook.select(1)); self.root.after(0, self.refresh_all_tables); self.log("\nАналіз завершено"); self.root.after(0, lambda: self.run_btn.config(state='normal'))
 
     def on_candidate_select(self, e):
         sel = self.tree_sum.selection()
@@ -548,11 +550,23 @@ class MonCouncilProApp:
         del self.all_papers[u]
         self.refresh_all_tables()
 
+    def copy_paper_title(self, details_label=None):
+        if not hasattr(self, 'selected_p_uuid'): return
+        p = self.all_papers[self.selected_p_uuid]
+        self.root.clipboard_clear()
+        self.root.clipboard_append(p['title'])
+        if details_label:
+            original = details_label.cget("fg")
+            details_label.config(fg="#28a745")
+            details_label.after(1500, lambda: details_label.config(fg=original))
+
     def open_paper_details(self):
         if not hasattr(self, 'selected_p_uuid'): return
         p = self.all_papers[self.selected_p_uuid]
         top = tk.Toplevel(self.root); top.title("Деталі публікації"); top.geometry("750x750")
-        tk.Label(top, text=p['title'], wraplength=700, font=("Arial", 11, "bold"), justify="left").pack(pady=10, padx=15)
+        title_label = tk.Label(top, text=p['title'], wraplength=700, font=("Arial", 11, "bold"), justify="center")
+        title_label.pack(pady=10, padx=15)
+        top.bind("<Control-c>", lambda e: self.copy_paper_title(details_label=title_label))
         txt = scrolledtext.ScrolledText(top, height=35, wrap=tk.WORD, font=("Arial", 10))
         txt.pack(padx=15, fill="both", expand=True)
         c = f"АВТОР: {self.all_candidates[p['cand_id']]['name']}\nРІК: {p['year']} | БАЛИ: {p['score']}\nДЖЕРЕЛО: {p['source']} | ЖУРНАЛ: {p.get('journal','-')}\n"
