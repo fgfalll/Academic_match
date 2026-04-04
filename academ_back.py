@@ -116,6 +116,7 @@ class MonCouncilProApp:
         self.cutoff_year = 2022; self.target_keywords = []; self.current_cand_filter = None
         self.current_author_keywords = []
         self.current_banned_keywords = []
+        self.global_banned_keywords = []
         self.create_widgets(); self.update_keyword_preview()
 
     def create_widgets(self):
@@ -131,6 +132,15 @@ class MonCouncilProApp:
         self.build_main_tab()
         self.build_edit_tab()
         self.build_advice_tab()
+
+    def show_text_context_menu(self, event):
+        menu = tk.Menu(event.widget, tearoff=0)
+        menu.add_command(label="Вирізати", command=lambda: event.widget.event_generate("<<Cut>>"))
+        menu.add_command(label="Копіювати", command=lambda: event.widget.event_generate("<<Copy>>"))
+        menu.add_command(label="Вставити", command=lambda: event.widget.event_generate("<<Paste>>"))
+        menu.add_separator()
+        menu.add_command(label="Виділити все", command=lambda: event.widget.tag_add("sel", "1.0", "end"))
+        menu.tk_popup(event.x_root, event.y_root)
 
     def build_main_tab(self):
         sf = ttk.LabelFrame(self.tab_main, text="Дані здобувача та керівника", padding="10"); sf.pack(fill="x", padx=10, pady=5)
@@ -160,6 +170,8 @@ class MonCouncilProApp:
         self.keyword_text = tk.Text(kwf, height=3); self.keyword_text.pack(fill="both", expand=True, pady=(0, 5))
         self.keyword_text.insert("1.0", "")
         self.keyword_text.bind("<KeyRelease>", self.update_keyword_preview)
+        self.keyword_text.bind("<Button-3>", self.show_text_context_menu)
+        self.candidates_text.bind("<Button-3>", self.show_text_context_menu)
         self.parsed_kw_label = ttk.Label(kwf, text="", foreground="#0056b3", wraplength=400); self.parsed_kw_label.pack(fill="x")
 
         bp = ttk.Frame(self.tab_main); bp.pack(fill="x", padx=10, pady=10)
@@ -185,6 +197,7 @@ class MonCouncilProApp:
         ent = ttk.Entry(fp, textvariable=self.search_title_var, width=25); ent.pack(side="left"); ent.bind("<KeyRelease>", lambda e: self.refresh_papers_table())
         self.filter_recent_var = tk.BooleanVar(value=True); ttk.Checkbutton(fp, text="Відсікати старі", variable=self.filter_recent_var, command=self.refresh_papers_table).pack(side="left", padx=10)
         self.filter_score_var = tk.BooleanVar(value=False); ttk.Checkbutton(fp, text="Тільки з балами", variable=self.filter_score_var, command=self.refresh_papers_table).pack(side="left", padx=5)
+        ttk.Button(fp, text="Виключити слова", command=self.open_global_ban_keywords).pack(side="left", padx=10)
         ttk.Button(fp, text="Додати статтю", command=self.open_add_manual_paper).pack(side="right", padx=5)
         ttk.Button(fp, text="Переіндексувати все", command=self.reindex_manual_papers).pack(side="right", padx=5)
 
@@ -208,14 +221,10 @@ class MonCouncilProApp:
         sb_x.pack(side="bottom", fill="x")
         self.tree_pap.pack(fill="both", expand=True)
         self.tree_pap.bind("<<TreeviewSelect>>", self.on_paper_select)
+        self.tree_pap.bind("<Double-Button-1>", lambda e: self.open_paper_details())
         
         self.pm = tk.Menu(self.root, tearoff=0)
-        self.pm.add_command(label="Деталі", command=self.open_paper_details)
-        self.pm.add_command(label="Копіювати назву", command=self.copy_paper_title)
-        self.pm.add_command(label="Редагувати ключові слова", command=self.open_manual_tags_dialog)
-        self.pm.add_separator()
-        self.pm.add_command(label="Видалити статтю", command=self.delete_selected_paper)
-        self.tree_pap.bind("<Button-3>", lambda e: self.pm.tk_popup(e.x_root, e.y_root))
+        self.tree_pap.bind("<Button-3>", self.show_paper_context_menu)
         self.tree_pap.bind("<Control-c>", lambda e: self.copy_paper_title())
 
     def build_advice_tab(self):
@@ -491,11 +500,16 @@ class MonCouncilProApp:
         [self.tree_pap.delete(i) for i in self.tree_pap.get_children()]
         sq = self.search_title_var.get().strip().lower()
         f_rec = self.filter_recent_var.get(); f_sc = self.filter_score_var.get()
+        def norm_kw(txt):
+            if not txt: return ""
+            return str(txt).lower().replace("'", "'").replace("`", "'").replace("'", "'").strip(string.punctuation + " ")
         sorted_p = sorted(self.all_papers.items(), key=lambda x: (x[1]['recent'], x[1]['score']), reverse=True)
         for u, p in sorted_p:
             if self.current_cand_filter and p['cand_id'] != self.current_cand_filter: continue
             if f_rec and not p['recent']: continue
             if f_sc and p['score'] <= 0: continue
+            paper_kws = [norm_kw(w) for w in p.get('author_keywords', [])] + [norm_kw(w) for w in p.get('manual_keywords', '').split(',') if w.strip()]
+            if any(norm_kw(b) in paper_kws for b in self.global_banned_keywords if b.strip()): continue
             if sq:
                 txt = (p['title'] + " " + p['manual_keywords'] + " " + ",".join(p.get('concepts', []))).lower()
                 if sq not in txt: continue
@@ -504,6 +518,30 @@ class MonCouncilProApp:
     def on_paper_select(self, e):
         sel = self.tree_pap.selection()
         if sel: self.selected_p_uuid = self.tree_pap.item(sel[0])['values'][0]
+
+    def show_paper_context_menu(self, event):
+        item = self.tree_pap.identify_row(event.y)
+        if not item:
+            return
+        
+        self.tree_pap.selection_set(item)
+        self.tree_pap.focus(item)
+        values = self.tree_pap.item(item, 'values')
+        self.selected_p_uuid = values[0]
+        
+        p = self.all_papers.get(self.selected_p_uuid)
+        if not p:
+            return
+        
+        menu = tk.Menu(self.root, tearoff=0)
+        menu.add_command(label="Деталі", command=self.open_paper_details)
+        menu.add_command(label="Копіювати назву", command=self.copy_paper_title)
+        menu.add_command(label="Редагувати ключові слова", command=self.open_manual_tags_dialog)
+        if p.get('source') == 'Manual':
+            menu.add_separator()
+            menu.add_command(label="Видалити статтю", command=self.delete_selected_paper)
+        
+        menu.tk_popup(event.x_root, event.y_root)
 
     def open_manual_tags_dialog(self):
         if not hasattr(self, 'selected_p_uuid'): return
@@ -568,7 +606,27 @@ class MonCouncilProApp:
         top = tk.Toplevel(self.root); top.title("Деталі публікації"); top.geometry("750x750")
         title_label = tk.Label(top, text=p['title'], wraplength=700, font=("Arial", 11, "bold"), justify="center")
         title_label.pack(pady=10, padx=15)
-        top.bind("<Control-c>", lambda e: self.copy_paper_title(details_label=title_label))
+        
+        def copy_title():
+            self.root.clipboard_clear()
+            self.root.clipboard_append(p['title'])
+            original = title_label.cget("fg")
+            title_label.config(fg="#28a745")
+            title_label.after(1500, lambda: title_label.config(fg=original))
+        
+        def smart_copy(e):
+            try:
+                selected = txt.get("sel.first", "sel.last")
+                if selected:
+                    txt.clipboard_clear()
+                    txt.clipboard_append(selected)
+                    return
+            except:
+                pass
+            copy_title()
+        
+        title_label.bind("<Button-3>", lambda e: copy_title())
+        
         txt = scrolledtext.ScrolledText(top, height=35, wrap=tk.WORD, font=("Arial", 10))
         txt.pack(padx=15, fill="both", expand=True)
         c = f"АВТОР: {self.all_candidates[p['cand_id']]['name']}\nРІК: {p['year']} | БАЛИ: {p['score']}\nДЖЕРЕЛО: {p['source']} | ЖУРНАЛ: {p.get('journal','-')}\n"
@@ -578,8 +636,23 @@ class MonCouncilProApp:
         c += f"КЛЮЧОВІ СЛОВА ШІ (OpenAlex): {', '.join(p.get('concepts', []))}\n\n"
         c += f"АНОТАЦІЯ:\n{p.get('abstract', 'Немає анотації.')}\n\n"
         if p['manual_keywords']: c += f"ВЛАСНІ КЛЮЧОВІ СЛОВА: {p['manual_keywords']}\n"
-        txt.insert("1.0", c); txt.config(state="disabled")
-        ttk.Button(top, text="Відкрити в браузері", command=lambda: webbrowser.open(p['url']) if p['url'] else None).pack(pady=10)
+        txt.insert("1.0", c)
+        
+        def show_txt_menu(e):
+            m = tk.Menu(txt, tearoff=0)
+            m.add_command(label="Копіювати", command=lambda: txt.event_generate("<<Copy>>"))
+            m.add_command(label="Вирізати", command=lambda: txt.event_generate("<<Cut>>"))
+            m.add_command(label="Вставити", command=lambda: txt.event_generate("<<Paste>>"))
+            m.add_separator()
+            m.add_command(label="Виділити все", command=lambda: txt.tag_add("sel", "1.0", "end"))
+            m.tk_popup(e.x_root, e.y_root)
+        
+        txt.bind("<Button-3>", show_txt_menu)
+        txt.bind("<Control-c>", smart_copy)
+        top.bind("<Control-c>", smart_copy)
+        
+        ttk.Button(top, text="Копіювати назву", command=copy_title).pack(pady=5)
+        ttk.Button(top, text="Відкрити в браузері", command=lambda: webbrowser.open(p['url']) if p['url'] else None).pack(pady=5)
 
     def open_add_manual_paper(self):
         if not self.all_candidates: return
@@ -684,6 +757,196 @@ class MonCouncilProApp:
             self.advice_listbox.insert(tk.END, c['name'])
             self.advice_cid_map.append(cid)
 
+    def open_global_ban_keywords(self):
+        top = tk.Toplevel(self.root)
+        top.title("Виключення слів (глобально)")
+        top.geometry("600x450")
+        
+        def norm_kw(txt):
+            if not txt: return ""
+            return str(txt).lower().replace("'", "'").replace("`", "'").replace("'", "'").strip(string.punctuation + " ")
+        
+        kw_by_source = {'Author': {}, 'OpenAlex': {}, 'Manual': {}}
+        kw_data = {}
+        
+        for u, p in self.all_papers.items():
+            paper_title = p.get('title', '')[:60]
+            
+            for kw in p.get('author_keywords', []):
+                n = norm_kw(kw)
+                if n not in kw_data:
+                    kw_data[n] = {'word': kw, 'sources': {'Author': [], 'OpenAlex': [], 'Manual': []}}
+                kw_data[n]['sources']['Author'].append(paper_title)
+                if n not in kw_by_source['Author']:
+                    kw_by_source['Author'][n] = {'word': kw, 'papers': []}
+                kw_by_source['Author'][n]['papers'].append(paper_title)
+            
+            for kw in p.get('manual_keywords', '').split(','):
+                kw = kw.strip()
+                if kw:
+                    n = norm_kw(kw)
+                    if n not in kw_data:
+                        kw_data[n] = {'word': kw, 'sources': {'Author': [], 'OpenAlex': [], 'Manual': []}}
+                    kw_data[n]['sources']['Manual'].append(paper_title)
+                    if n not in kw_by_source['Manual']:
+                        kw_by_source['Manual'][n] = {'word': kw, 'papers': []}
+                    kw_by_source['Manual'][n]['papers'].append(paper_title)
+            
+            for kw in p.get('concepts', []):
+                n = norm_kw(kw)
+                if n not in kw_data:
+                    kw_data[n] = {'word': kw, 'sources': {'Author': [], 'OpenAlex': [], 'Manual': []}}
+                kw_data[n]['sources']['OpenAlex'].append(paper_title)
+                if n not in kw_by_source['OpenAlex']:
+                    kw_by_source['OpenAlex'][n] = {'word': kw, 'papers': []}
+                kw_by_source['OpenAlex'][n]['papers'].append(paper_title)
+        
+        for kw in self.global_banned_keywords:
+            n = norm_kw(kw)
+            if n not in kw_data:
+                kw_data[n] = {'word': kw, 'sources': {'Author': [], 'OpenAlex': [], 'Manual': []}}
+        
+        source_var = tk.StringVar(value="Всі")
+        search_var = tk.StringVar()
+        banned_norm = set(norm_kw(k) for k in self.global_banned_keywords)
+        source_map = {"Всі": None, "Ключові слова": "Author", "OpenAlex концепти": "OpenAlex", "Manual": "Manual"}
+        
+        avail_listbox = None
+        ban_listbox = None
+        
+        def move_items(src, dst, to_ban):
+            nonlocal avail_listbox, ban_listbox
+            sel = src.curselection()
+            if not sel:
+                return
+            items = [src.get(i) for i in sel]
+            for i in reversed(sel):
+                src.delete(i)
+            for item in items:
+                dst.insert(tk.END, item)
+                if to_ban:
+                    if item not in self.global_banned_keywords:
+                        self.global_banned_keywords.append(item)
+                else:
+                    if item in self.global_banned_keywords:
+                        self.global_banned_keywords.remove(item)
+        
+        def populate_lists():
+            nonlocal avail_listbox, ban_listbox
+            avail_listbox.delete(0, tk.END)
+            ban_listbox.delete(0, tk.END)
+            search_text = search_var.get().lower()
+            sel_source = source_map.get(source_var.get())
+            
+            if sel_source:
+                src_kws = kw_by_source.get(sel_source, {})
+                for n, data in src_kws.items():
+                    if search_text and search_text not in data['word'].lower():
+                        continue
+                    if n in banned_norm:
+                        ban_listbox.insert(tk.END, data['word'])
+                    else:
+                        avail_listbox.insert(tk.END, data['word'])
+            else:
+                for n, data in kw_data.items():
+                    if search_text and search_text not in data['word'].lower():
+                        continue
+                    if n in banned_norm:
+                        ban_listbox.insert(tk.END, data['word'])
+                    else:
+                        avail_listbox.insert(tk.END, data['word'])
+        
+        def on_source_change(*args):
+            populate_lists()
+        
+        def on_search_change(*args):
+            populate_lists()
+        
+        def on_source_change(*args):
+            populate_lists()
+        
+        source_var.trace("w", on_source_change)
+        search_var.trace("w", on_search_change)
+        
+        main_frame = ttk.Frame(top, padding="10")
+        main_frame.pack(fill="both", expand=True)
+        
+        filter_frame = ttk.Frame(main_frame)
+        filter_frame.pack(fill="x", pady=(0, 10))
+        ttk.Label(filter_frame, text="Джерело:").pack(side="left")
+        source_combo = ttk.Combobox(filter_frame, textvariable=source_var, values=["Всі", "Ключові слова", "OpenAlex концепти", "Manual"], state="readonly", width=20)
+        source_combo.pack(side="left", padx=5)
+        
+        search_frame = ttk.Frame(main_frame)
+        search_frame.pack(fill="x", pady=(0, 10))
+        ttk.Label(search_frame, text="Пошук:").pack(side="left")
+        search_entry = ttk.Entry(search_frame, textvariable=search_var, width=40)
+        search_entry.pack(side="left", padx=5)
+        
+        content_frame = ttk.Frame(main_frame)
+        content_frame.pack(fill="both", expand=True, pady=5)
+        
+        avail_frame = ttk.LabelFrame(content_frame, text="Доступні", padding="5")
+        avail_frame.pack(side="left", fill="both", expand=True, padx=(0, 5))
+        
+        ban_frame = ttk.LabelFrame(content_frame, text="Виключені", padding="5")
+        ban_frame.pack(side="right", fill="both", expand=True, padx=(5, 0))
+        
+        avail_listbox = tk.Listbox(avail_frame, selectmode=tk.EXTENDED)
+        avail_listbox.pack(side="left", fill="both", expand=True)
+        avail_sb = ttk.Scrollbar(avail_frame, orient="vertical", command=avail_listbox.yview)
+        avail_listbox.config(yscrollcommand=avail_sb.set)
+        avail_sb.pack(side="right", fill="y")
+        
+        ban_listbox = tk.Listbox(ban_frame, selectmode=tk.EXTENDED)
+        ban_listbox.pack(side="left", fill="both", expand=True)
+        ban_sb = ttk.Scrollbar(ban_frame, orient="vertical", command=ban_listbox.yview)
+        ban_listbox.config(yscrollcommand=ban_sb.set)
+        ban_sb.pack(side="right", fill="y")
+        
+        btn_mid_frame = ttk.Frame(content_frame)
+        btn_mid_frame.pack(side="left", fill="y", padx=5)
+        ttk.Button(btn_mid_frame, text="->", width=5, command=lambda: move_items(avail_listbox, ban_listbox, True)).pack(pady=5)
+        ttk.Button(btn_mid_frame, text="<-", width=5, command=lambda: move_items(ban_listbox, avail_listbox, False)).pack(pady=5)
+        
+        context_menu = tk.Menu(top, tearoff=0)
+        
+        def show_context_menu(event):
+            widget = event.widget
+            if widget not in [avail_listbox, ban_listbox]:
+                return
+            idx = widget.nearest(event.y)
+            if idx < 0:
+                return
+            word = widget.get(idx)
+            word_norm = norm_kw(word)
+            context_menu.delete(0, tk.END)
+            if word_norm in kw_data:
+                kw_info = kw_data[word_norm]
+                context_menu.add_command(label=f"[{word}]", state="disabled")
+                context_menu.add_separator()
+                for source in ['Author', 'OpenAlex', 'Manual']:
+                    papers = kw_info['sources'][source]
+                    if papers:
+                        unique_papers = list(dict.fromkeys(papers))
+                        context_menu.add_command(label=f"  {source}: {len(unique_papers)}", state="disabled")
+                        for pt in unique_papers[:3]:
+                            context_menu.add_command(label=f"    - {pt}...", state="disabled")
+                        if len(unique_papers) > 3:
+                            context_menu.add_command(label=f"    +{len(unique_papers) - 3} more", state="disabled")
+            context_menu.post(event.x_root, event.y_root)
+        
+        avail_listbox.bind("<Button-3>", show_context_menu)
+        ban_listbox.bind("<Button-3>", show_context_menu)
+        
+        populate_lists()
+        
+        btn_frame = ttk.Frame(main_frame)
+        btn_frame.pack(fill="x", pady=(10, 0))
+        ttk.Button(btn_frame, text="Очистити все", command=lambda: (self.global_banned_keywords.clear(), ban_listbox.delete(0, tk.END), populate_lists())).pack(side="left", padx=5)
+        ttk.Button(btn_frame, text="Закрити", command=top.destroy).pack(side="right", padx=5)
+        ttk.Button(btn_frame, text="Зберегти та закрити", command=lambda: (self.refresh_papers_table(), top.destroy())).pack(side="right", padx=5)
+
     def open_blacklist_window(self):
         sel = self.advice_listbox.curselection()
         if not sel:
@@ -697,6 +960,8 @@ class MonCouncilProApp:
         def norm_kw(txt):
             if not txt: return ""
             return str(txt).lower().replace("'", "'").replace("`", "'").replace("'", "'").strip(string.punctuation + " ")
+        for kw in self.global_banned_keywords:
+            banned_all.add(norm_kw(kw))
         for cid in cids:
             banned_all.update(self.all_candidates[cid].get('banned_keywords', []))
             for pid in self.all_candidates[cid]['papers_uuids']:
@@ -808,6 +1073,8 @@ class MonCouncilProApp:
             if not txt: return ""
             return str(txt).lower().replace("'", "'").replace("`", "'").replace("'", "'").strip(string.punctuation + " ")
         banned_set = set()
+        for b in self.global_banned_keywords:
+            banned_set.add(norm_kw(b))
         for cid in cids:
             for b in self.all_candidates[cid].get('banned_keywords', []):
                 banned_set.add(norm_kw(b))
