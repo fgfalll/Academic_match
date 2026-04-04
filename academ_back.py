@@ -147,7 +147,9 @@ class MonCouncilProApp:
         self.super_id_var = tk.StringVar()
         ttk.Entry(sf, textvariable=self.super_id_var, width=25).grid(row=2, column=1, sticky="w", padx=5)
         self.deep_analysis_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(sf, text="Аналізувати анотації та співавторів", variable=self.deep_analysis_var).grid(row=2, column=2, sticky="w", padx=10)
+        ttk.Checkbutton(sf, text="Аналізувати анотації та співавторів (ORCID/OpenAlex)", variable=self.deep_analysis_var).grid(row=2, column=2, sticky="w", padx=10)
+        self.deep_scholar_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(sf, text="Глибокий аналіз Scholar (повільніше)", variable=self.deep_scholar_var).grid(row=2, column=3, sticky="w", padx=10)
 
         wa = ttk.Frame(self.tab_main); wa.pack(fill="both", expand=True, padx=10, pady=5)
         inf = ttk.LabelFrame(wa, text="Кандидати (ORCHID\Google Scholar через кому)", padding="10"); inf.pack(side="left", fill="both", expand=True, padx=(0, 5))
@@ -438,21 +440,21 @@ class MonCouncilProApp:
                 try:
                     aq = scholarly.search_author_id(gs_id); ad = scholarly.fill(aq, sections=['publications'])
                     if a_name == "Невідомо": a_name = ad.get('name', 'Невідомо')
-                    pubs = ad.get('publications', []); interests = ad.get('interests', [])
+                    pubs = ad.get('publications', [])
                     for i, w in enumerate(pubs):
                         self.log_status(header, f"{i+1}/{len(pubs)}")
-                        if i > 0: time.sleep(random.uniform(15, 25) if i % 5 == 0 else random.uniform(5, 10))
+                        if i > 0: time.sleep(random.uniform(30, 45) if i % 3 == 0 else random.uniform(15, 25))
                         try:
                             bib = w.get('bib', {}); t = bib.get('title', ''); y = int(bib.get('pub_year', '0')); ab = ""
-                            if self.deep_analysis_var.get() and y >= (self.cutoff_year - 1):
-                                try: time.sleep(random.uniform(3, 7)); wf = scholarly.fill(w); ab = wf.get('bib', {}).get('abstract', '')
+                            if self.deep_scholar_var.get() and y >= (self.cutoff_year - 1):
+                                try: time.sleep(random.uniform(8, 15)); wf = scholarly.fill(w); ab = wf.get('bib', {}).get('abstract', '')
                                 except: pass
                             if phd_id and (phd_id in bib.get('author', '').lower() or a_name.lower() in bib.get('author', '').lower()): conflict = "Співавтор"
                             k = re.sub(r'\W+', '', t.lower())
                             if k in merged_local:
                                 merged_local[k]['source'] += " + GS"
                                 if not merged_local[k].get('abstract'): merged_local[k]['abstract'] = ab
-                            else: merged_local[k] = {'title': t, 'year': y, 'concepts': interests, 'author_keywords': [], 'abstract': ab, 'source': 'Scholar', 'manual_keywords': '', 'authors_full': [], 'journal': '-', 'url': w.get('pub_url', '')}
+                            else: merged_local[k] = {'title': t, 'year': y, 'concepts': [], 'author_keywords': [], 'abstract': ab, 'source': 'Scholar', 'manual_keywords': '', 'authors_full': [], 'journal': '-', 'url': w.get('pub_url', '')}
                         except: continue
                 except Exception as e: self.log(f"Помилка Scholar: {str(e)}")
 
