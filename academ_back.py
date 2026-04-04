@@ -12,6 +12,8 @@ from scholarly import scholarly
 from fake_useragent import UserAgent
 import webbrowser
 import re
+import json
+import os
 
 
 # --- НАЛАШТУВАННЯ SCHOLARLY ---
@@ -121,6 +123,17 @@ class MonCouncilProApp:
         self.create_widgets(); self.update_keyword_preview()
 
     def create_widgets(self):
+        menubar = tk.Menu(self.root)
+        self.root.config(menu=menubar)
+        file_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="Файл", menu=file_menu)
+        file_menu.add_command(label="Зберегти сесію", command=self.save_session, accelerator="Ctrl+S")
+        file_menu.add_command(label="Завантажити сесію", command=self.load_session, accelerator="Ctrl+O")
+        file_menu.add_separator()
+        file_menu.add_command(label="Вихід", command=self.root.quit)
+        self.root.bind("<Control-s>", lambda e: self.save_session())
+        self.root.bind("<Control-o>", lambda e: self.load_session())
+
         self.notebook = ttk.Notebook(self.root); self.notebook.pack(fill="both", expand=True, padx=5, pady=5)
         self.tab_main = ttk.Frame(self.notebook)
         self.tab_edit = ttk.Frame(self.notebook)
@@ -288,6 +301,97 @@ class MonCouncilProApp:
         self.target_keywords = [k.strip(string.punctuation + " \n").lower() for k in raw.split(',') if k.strip()]
         self.parsed_kw_label.config(text=f"[Масив: {', '.join(self.target_keywords)}]" if self.target_keywords else "")
 
+    def _get_default_save_path(self):
+        import os
+        session_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sessions")
+        os.makedirs(session_dir, exist_ok=True)
+        year = self.year_var.get() or datetime.now().year
+        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        default_name = f"council_{year}_{timestamp}.json"
+        return os.path.join(session_dir, default_name)
+
+    def get_session_data(self):
+        return {
+            'version': 2,
+            'saved_at': datetime.now().strftime("%Y-%m-%d_%H-%M-%S"),
+            'tab1_inputs': {
+                'council_year': self.year_var.get(),
+                'years_back': self.years_back_var.get(),
+                'phd_candidate_orcid': self.phd_id_var.get(),
+                'supervisor_orcid': self.super_id_var.get(),
+                'candidates_text': self.candidates_text.get("1.0", tk.END).strip(),
+                'target_keywords_text': self.keyword_text.get("1.0", tk.END).strip()
+            },
+            'analysis_state': {
+                'cutoff_year': self.cutoff_year,
+                'target_keywords': self.target_keywords,
+                'global_banned_keywords': self.global_banned_keywords,
+                'all_candidates': self.all_candidates,
+                'all_papers': self.all_papers
+            }
+        }
+
+    def load_session_data(self, data):
+        if data.get('version', 1) >= 2:
+            tab1 = data.get('tab1_inputs', {})
+            self.year_var.set(tab1.get('council_year', datetime.now().year))
+            self.years_back_var.set(tab1.get('years_back', 4))
+            self.phd_id_var.set(tab1.get('phd_candidate_orcid', ''))
+            self.super_id_var.set(tab1.get('supervisor_orcid', ''))
+            self.candidates_text.delete("1.0", tk.END)
+            self.candidates_text.insert("1.0", tab1.get('candidates_text', ''))
+            self.keyword_text.delete("1.0", tk.END)
+            self.keyword_text.insert("1.0", tab1.get('target_keywords_text', ''))
+            self.update_keyword_preview()
+
+        state = data.get('analysis_state', {})
+        self.cutoff_year = state.get('cutoff_year', 2022)
+        self.target_keywords = state.get('target_keywords', [])
+        self.global_banned_keywords = state.get('global_banned_keywords', [])
+        self.all_candidates = state.get('all_candidates', {})
+        self.all_papers = state.get('all_papers', {})
+
+        for i in self.tree_sum.get_children(): self.tree_sum.delete(i)
+        for i in self.tree_pap.get_children(): self.tree_pap.delete(i)
+        self.refresh_all_tables()
+        self.notebook.select(1)
+        self.log(f"Сесію завантажено: {data.get('saved_at', 'unknown')}")
+
+    def save_session(self):
+        import os, json
+        path = filedialog.asksaveasfilename(
+            initialdir=os.path.dirname(self._get_default_save_path()),
+            defaultextension=".json",
+            filetypes=[("JSON файли", "*.json"), ("Всі файли", "*.*")],
+            initialfile=os.path.basename(self._get_default_save_path())
+        )
+        if not path: return
+        try:
+            data = self.get_session_data()
+            with open(path, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            self.log(f"Сесію збережено: {path}")
+            messagebox.showinfo("Збереження сесії", f"Сесію успішно збережено!")
+        except Exception as e:
+            self.log(f"Помилка збереження: {str(e)}")
+            messagebox.showerror("Помилка", f"Не вдалося зберегти сесію: {str(e)}")
+
+    def load_session(self):
+        import os, json
+        path = filedialog.askopenfilename(
+            initialdir=os.path.join(os.path.dirname(os.path.abspath(__file__)), "sessions"),
+            filetypes=[("JSON файли", "*.json"), ("Всі файли", "*.*")]
+        )
+        if not path: return
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            self.load_session_data(data)
+            messagebox.showinfo("Завантаження сесії", f"Сесію успішно завантажено!")
+        except Exception as e:
+            self.log(f"Помилка завантаження: {str(e)}")
+            messagebox.showerror("Помилка", f"Не вдалося завантажити сесію: {str(e)}")
+
     def auto_fetch_keywords(self):
         oid = self.phd_id_var.get().strip()
         if not oid: return
@@ -325,49 +429,266 @@ class MonCouncilProApp:
             p.update({'score': sc, 'matched_details': ", ".join(m), 'recent': (p['year'] >= self.cutoff_year)})
         self.refresh_all_tables()
 
+    def _parse_candidate_ids(self, line):
+        """Parse ORCID and GS ID from a candidate line. Returns (orcid, gs_id)."""
+        orcid = ""; gs_id = ""
+        parts = [p.strip() for p in line.split(',')]
+        for p in parts:
+            p_clean = p.replace('‑', '-').replace('−', '-')
+            orcid_m = re.search(r'\b\d{4}-\d{4}-\d{4}-\d{3}[\dX]\b', p_clean)
+            if orcid_m:
+                orcid = orcid_m.group(0)
+            elif 'user=' in p_clean:
+                gs_m = re.search(r'user=([\w-]{12})', p_clean)
+                if gs_m: gs_id = gs_m.group(1)
+            elif re.match(r'^[\w-]{12}$', p_clean):
+                gs_id = p_clean
+            elif len(p_clean) > 5 and not orcid:
+                gs_id = p_clean
+        return orcid, gs_id
+
+    def _find_existing_candidate(self, orcid, gs_id):
+        """Find existing candidate by ORCID or GS ID. Returns cand_id or None."""
+        if not orcid and not gs_id: return None
+        for cid, c in self.all_candidates.items():
+            ids_str = c.get('ids', '')
+            if orcid and f"ORCID:{orcid}" in ids_str: return cid
+            if gs_id and f"GS:{gs_id}" in ids_str: return cid
+        return None
+
+    def _ask_author_name(self, default_name="Невідомо"):
+        """Ask user to enter author name. Returns entered name or default."""
+        top = tk.Toplevel(self.root)
+        top.title("Введіть ім'я автора")
+        top.geometry("500x180")
+        
+        frame = ttk.Frame(top, padding="20")
+        frame.pack(fill="both", expand=True)
+        
+        ttk.Label(frame, text="Ім'я автора не знайдено автоматично.", font="Helvetica 10 bold").pack(pady=(0, 5))
+        ttk.Label(frame, text="Введіть ім'я автора вручну:").pack(anchor="w", pady=(0, 10))
+        
+        name_var = tk.StringVar(value=default_name if default_name != "Невідомо" else "")
+        name_entry = ttk.Entry(frame, textvariable=name_var, width=60)
+        name_entry.pack(pady=(0, 15), fill="x")
+        name_entry.focus()
+        
+        result = {'name': default_name}
+        
+        def on_ok():
+            result['name'] = name_var.get().strip() or default_name
+            top.destroy()
+        
+        def on_cancel():
+            result['name'] = default_name
+            top.destroy()
+        
+        btn_frame = ttk.Frame(frame)
+        btn_frame.pack()
+        ttk.Button(btn_frame, text="Скасувати", command=on_cancel).pack(side="left", padx=10)
+        ttk.Button(btn_frame, text="OK", command=on_ok).pack(side="left", padx=10)
+        
+        name_entry.bind("<Return>", lambda e: on_ok())
+        name_entry.bind("<Escape>", lambda e: on_cancel())
+        
+        top.grab_set()
+        self.root.wait_window(top)
+        return result['name']
+
+    def _update_candidate_name(self, cand_id, new_name):
+        """Update candidate name from manual entry dialog."""
+        if cand_id in self.all_candidates:
+            self.all_candidates[cand_id]['name'] = new_name
+            self.refresh_all_tables()
+            self.log(f"[{cand_id}] Ім'я оновлено: {new_name}")
+
+    def _queue_name_request(self, cand_id, orcid, gs_id):
+        """Queue a name entry request for processing after all fetching."""
+        if not hasattr(self, '_name_request_queue'):
+            self._name_request_queue = []
+        self._name_request_queue.append({'cand_id': cand_id, 'orcid': orcid, 'gs_id': gs_id})
+
+    def _process_name_queue(self):
+        """Process queued name entry requests one at a time."""
+        if not hasattr(self, '_name_request_queue') or not self._name_request_queue:
+            return
+        if hasattr(self, '_processing_name_queue') and self._processing_name_queue:
+            return
+        
+        self._processing_name_queue = True
+        self._process_next_name()
+
+    def _process_next_name(self):
+        """Process next name request in queue."""
+        if not hasattr(self, '_name_request_queue') or not self._name_request_queue:
+            self._processing_name_queue = False
+            return
+        
+        request = self._name_request_queue.pop(0)
+        cand_id = request['cand_id']
+        
+        if cand_id not in self.all_candidates or self.all_candidates[cand_id]['name'] != "Невідомо":
+            self._process_next_name()
+            return
+        
+        top = tk.Toplevel(self.root)
+        top.title("Введіть ім'я автора")
+        top.geometry("500x180")
+        
+        frame = ttk.Frame(top, padding="20")
+        frame.pack(fill="both", expand=True)
+        
+        ids_info = []
+        if request['orcid']: ids_info.append(f"ORCID: {request['orcid']}")
+        if request['gs_id']: ids_info.append(f"GS: {request['gs_id']}")
+        ids_text = ", ".join(ids_info) if ids_info else "Немає ID"
+        
+        ttk.Label(frame, text=f"Кандидат: {cand_id}", font="Helvetica 10 bold").pack(pady=(0, 5))
+        ttk.Label(frame, text=f"ID: {ids_text}").pack(anchor="w", pady=(0, 5))
+        ttk.Label(frame, text="Введіть ім'я автора:", font="Helvetica 10").pack(anchor="w", pady=(5, 10))
+        
+        name_var = tk.StringVar()
+        name_entry = ttk.Entry(frame, textvariable=name_var, width=60)
+        name_entry.pack(pady=(0, 15), fill="x")
+        name_entry.focus()
+        
+        def on_next(ask_again=True):
+            entered_name = name_var.get().strip()
+            if entered_name:
+                self._update_candidate_name(cand_id, entered_name)
+            top.destroy()
+            if ask_again and self._name_request_queue:
+                self.root.after(100, self._process_next_name)
+            else:
+                self._processing_name_queue = False
+                self._name_request_queue = []
+        
+        def on_skip():
+            on_next(ask_again=True)
+        
+        btn_frame = ttk.Frame(frame)
+        btn_frame.pack()
+        ttk.Button(btn_frame, text="Пропустити", command=on_skip).pack(side="left", padx=10)
+        ttk.Button(btn_frame, text="Далі", command=lambda: on_next()).pack(side="left", padx=10)
+        
+        name_entry.bind("<Return>", lambda e: on_next())
+        name_entry.bind("<Escape>", lambda e: on_skip())
+        
+        top.grab_set()
+
+    def _verify_author_match(self, orcid_name, gs_name, orcid, gs_id):
+        """Verify ORCID and Google Scholar belong to same author. Returns (verified_name, warning)."""
+        if not orcid_name or not gs_name:
+            return (orcid_name or gs_name or "Невідомо", None)
+        
+        if orcid_name == "Невідомо" and gs_name == "Невідомо":
+            return ("Невідомо", None)
+        
+        norm_orcid = orcid_name.lower().strip()
+        norm_gs = gs_name.lower().strip()
+        
+        if norm_orcid == norm_gs:
+            return (gs_name, None)
+        
+        words_orcid = set(norm_orcid.split())
+        words_gs = set(norm_gs.split())
+        common = words_orcid & words_gs
+        
+        if len(common) >= 2 and (len(words_orcid) <= 3 or len(common) >= len(words_orcid) * 0.5):
+            return (gs_name, f"УВАГА: Імена можуть відрізнятися (ORCID: '{orcid_name}', GS: '{gs_name}')")
+        
+        return (gs_name, f"УВАГА: Імена не співпадають! ORCID: '{orcid_name}', Google Scholar: '{gs_name}'. Продовження...")
     def start_analysis(self):
         lines = [l.strip() for l in self.candidates_text.get("1.0", tk.END).split('\n') if l.strip()]
         if not lines or not self.target_keywords: return
-        self.all_candidates.clear(); self.all_papers.clear()
-        for i in self.tree_sum.get_children(): self.tree_sum.delete(i)
-        for i in self.tree_pap.get_children(): self.tree_pap.delete(i)
-        self.run_btn.config(state='disabled'); self.clear_log()
-        threading.Thread(target=self.run_algorithm, args=(lines, self.phd_id_var.get().strip().lower(), self.super_id_var.get().strip().lower()), daemon=True).start()
 
-    def run_algorithm(self, lines, phd_id, super_id):
+        phd_id = self.phd_id_var.get().strip().lower()
+        super_id = self.super_id_var.get().strip().lower()
+
+        new_lines = []
+        existing_info = {}
+        has_existing = False
+
+        for line in lines:
+            orcid, gs_id = self._parse_candidate_ids(line)
+            existing_cid = self._find_existing_candidate(orcid, gs_id)
+            if existing_cid:
+                has_existing = True
+                sources_fetched = self.all_candidates[existing_cid].get('sources_fetched', [])
+                existing_info[existing_cid] = {
+                    'orcid': orcid, 'gs_id': gs_id,
+                    'line': line, 'sources_fetched': sources_fetched
+                }
+            else:
+                new_lines.append(line)
+
+        if has_existing and not new_lines:
+            self.log("=== ВСІ ДАНІ ВЖЕ ЗАВАНТАЖЕНІ ===")
+            self.log("Спробуйте інший список кандидатів або додайте нові ID.")
+            self.run_btn.config(state='normal')
+            return
+        elif has_existing:
+            self.log(f"=== ПРОДОВЖЕННЯ: {len(existing_info)} існуючих, {len(new_lines)} нових ===")
+            existing_papers_before = len(self.all_papers)
+        else:
+            self.log("=== НОВИЙ АНАЛІЗ ===")
+            existing_info = {}
+            self.all_candidates.clear()
+            self.all_papers.clear()
+            for i in self.tree_sum.get_children(): self.tree_sum.delete(i)
+            for i in self.tree_pap.get_children(): self.tree_pap.delete(i)
+
+        self.run_btn.config(state='disabled'); self.clear_log()
+        threading.Thread(target=self.run_algorithm,
+                         args=(lines, phd_id, super_id, existing_info),
+                         daemon=True).start()
+
+    def run_algorithm(self, lines, phd_id, super_id, existing_info=None):
         self.cutoff_year = int(self.year_var.get() or datetime.now().year) - self.years_back_var.get()
+        existing_info = existing_info or {}
+
         for idx, line in enumerate(lines):
-            cand_id = f"cand_{idx}"
-            parts = [p.strip() for p in line.split(',')]
-            orcid = ""
-            gs_id = ""
-            
-            for p in parts:
-                p_clean = p.replace('‑', '-').replace('−', '-') # Нормалізація дефісів
-                
-                orcid_m = re.search(r'\b\d{4}-\d{4}-\d{4}-\d{3}[\dX]\b', p_clean)
-                if orcid_m:
-                    orcid = orcid_m.group(0)
-                elif 'user=' in p_clean:
-                    gs_m = re.search(r'user=([\w-]{12})', p_clean)
-                    if gs_m: gs_id = gs_m.group(1)
-                elif re.match(r'^[\w-]{12}$', p_clean):
-                    gs_id = p_clean
-                elif len(p_clean) > 5 and not orcid:
-                    gs_id = p_clean # Резервний варіант
-            
-            d_ids = []; doi_map = {}; merged_local = {}
+            orcid, gs_id = self._parse_candidate_ids(line)
+            existing_cid = self._find_existing_candidate(orcid, gs_id)
+            is_existing = existing_cid is not None and existing_cid in existing_info
+
+            if is_existing:
+                cand_id = existing_cid
+                info = existing_info[existing_cid]
+                sources_fetched = info.get('sources_fetched', [])
+                a_name = self.all_candidates[cand_id].get('name', 'Невідомо')
+                conflict = self.all_candidates[cand_id].get('conflict', 'Немає')
+                merged_local = {}
+                doi_map = {}
+                self.log(f"[{cand_id}] ПРОДОВЖЕННЯ (вже має {len(self.all_candidates[cand_id]['papers_uuids'])} робіт)")
+            else:
+                cand_id = f"cand_{idx}"
+                sources_fetched = []
+                parts = [p.strip() for p in line.split(',')]
+                orcid = ""; gs_id = ""
+
+                for p in parts:
+                    p_clean = p.replace('‑', '-').replace('−', '-')
+                    orcid_m = re.search(r'\b\d{4}-\d{4}-\d{4}-\d{3}[\dX]\b', p_clean)
+                    if orcid_m: orcid = orcid_m.group(0)
+                    elif 'user=' in p_clean:
+                        gs_m = re.search(r'user=([\w-]{12})', p_clean)
+                        if gs_m: gs_id = gs_m.group(1)
+                    elif re.match(r'^[\w-]{12}$', p_clean): gs_id = p_clean
+                    elif len(p_clean) > 5 and not orcid: gs_id = p_clean
+
+                merged_local = {}
+                doi_map = {}
+                a_name = "Невідомо"
+                conflict = "Немає"
+                if super_id and (super_id == orcid.lower() or super_id == gs_id.lower()): conflict = "Керівник"
+
+            d_ids = []
             if orcid: d_ids.append(f"ORCID:{orcid}")
             if gs_id: d_ids.append(f"GS:{gs_id}")
-            a_name = "Невідомо"
-            
-            # Перевірка на керівника: тільки якщо вказано super_id І він збігається з orcid/gs_id поточного кандидата
-            conflict = "Немає"
-            if super_id and (super_id == orcid.lower() or super_id == gs_id.lower()): 
-                conflict = "Керівник"
 
-            # 1. ORCID
-            if orcid:
+            # 1. ORCID (skip if already fetched)
+            if orcid and 'ORCID' not in sources_fetched:
                 self.log(f"[{cand_id}] Отримання робіт з ORCID...")
                 try:
                     r = requests.get(f"https://pub.orcid.org/v3.0/{orcid}/works", headers={'Accept': 'application/json'}, timeout=15)
@@ -379,14 +700,14 @@ class MonCouncilProApp:
                                 y = 0; doi = ""
                                 try: y = int(s.get('publication-date', {}).get('year', {}).get('value', '0'))
                                 except: pass
-                                
+
                                 ext_ids = s.get('external-ids') or {}
                                 if isinstance(ext_ids, dict):
                                     for ext in ext_ids.get('external-id', []):
                                         if ext.get('external-id-type') == 'doi':
                                             doi = (ext.get('external-id-value') or '').lower().strip().replace('https://doi.org/', '')
                                             break
-                                            
+
                                 k = re.sub(r'\W+', '', t.lower())
                                 p_data = {'title': t, 'year': y, 'doi': doi, 'concepts': [], 'author_keywords': [], 'abstract': '', 'source': 'ORCID', 'manual_keywords': '', 'authors_full': [], 'journal': '-', 'url': s.get('url', {}).get('value', '') if s.get('url') else (f"https://doi.org/{doi}" if doi else '')}
                                 merged_local[k] = p_data
@@ -394,8 +715,8 @@ class MonCouncilProApp:
                     else: self.log(f"   ! Помилка ORCID HTTP {r.status_code}")
                 except Exception as e: self.log(f"   ! Помилка ORCID: {str(e)}")
 
-            # 2. OpenAlex
-            if orcid:
+            # 2. OpenAlex (skip if already fetched)
+            if orcid and 'OpenAlex' not in sources_fetched:
                 self.log(f"[{cand_id}] Доповнення через OpenAlex...")
                 oa_h = {'User-Agent': 'AcademicMatch/1.0 (mailto:mon-phd-check@example.com)'}
                 try:
@@ -428,17 +749,17 @@ class MonCouncilProApp:
                                     pl = ws.get('primary_location') or {}
                                     journal = (pl.get('source') or {}).get('display_name', '-') or '-'
                                     meta = {
-                                        'concepts': [c.get('display_name', '') for c in ws.get('topics', [])] or [c.get('display_name', '') for c in ws.get('concepts', [])], 
-                                        'author_keywords': [kw.get('display_name', '') for kw in ws.get('keywords', [])], 
-                                        'abstract': ab, 
-                                        'journal': journal, 
-                                        'authors_full': [a.get('author', {}).get('display_name', 'Невідомо') for a in ws.get('authorships', [])], 
+                                        'concepts': [c.get('display_name', '') for c in ws.get('topics', [])] or [c.get('display_name', '') for c in ws.get('concepts', [])],
+                                        'author_keywords': [kw.get('display_name', '') for kw in ws.get('keywords', [])],
+                                        'abstract': ab,
+                                        'journal': journal,
+                                        'authors_full': [a.get('author', {}).get('display_name', 'Невідомо') for a in ws.get('authorships', [])],
                                         'url': ws.get('doi') or ''
                                     }
-                                    if target_k: 
+                                    if target_k:
                                         merged_local[target_k].update(meta)
                                         if 'OpenAlex' not in merged_local[target_k]['source']: merged_local[target_k]['source'] += " + OA"
-                                    else: 
+                                    else:
                                         merged_local[k_oa] = {'title': w_title, 'year': ws.get('publication_year', 0), 'doi': w_doi, 'source': 'OpenAlex', 'manual_keywords': '', **meta}
 
                                     if phd_id:
@@ -448,13 +769,15 @@ class MonCouncilProApp:
                     else: self.log(f"   ! Помилка списку OA HTTP {r_l.status_code}")
                 except Exception as e: self.log(f"   ! Помилка запиту OA: {str(e)}")
 
-            # 3. Scholar
-            if gs_id:
+            # 3. Scholar (skip if already fetched)
+            gs_fetched_name = "Невідомо"
+            if gs_id and 'Scholar' not in sources_fetched:
                 header = f"Scholar: {a_name if a_name != 'Невідомо' else gs_id}"
                 self.log_status(header, "Отримання списку Scholar...")
                 try:
                     aq = scholarly.search_author_id(gs_id); ad = scholarly.fill(aq, sections=['publications'])
-                    if a_name == "Невідомо": a_name = ad.get('name', 'Невідомо')
+                    gs_fetched_name = ad.get('name', 'Невідомо')
+                    if a_name == "Невідомо": a_name = gs_fetched_name
                     pubs = ad.get('publications', [])
                     for i, w in enumerate(pubs):
                         self.log_status(header, f"{i+1}/{len(pubs)}")
@@ -473,14 +796,52 @@ class MonCouncilProApp:
                         except: continue
                 except Exception as e: self.log(f"Помилка Scholar: {str(e)}")
 
-            self.all_candidates[cand_id] = {'name': a_name, 'ids': ", ".join(d_ids), 'conflict': conflict, 'papers_uuids': [], 'banned_keywords': []}
+            # Verify ORCID and GS names match when both are present
+            orcid_name_for_verify = None
+            if 'ORCID' not in sources_fetched and orcid:
+                orcid_name_for_verify = a_name if a_name != "Невідомо" else None
+            
+            if orcid_name_for_verify and gs_fetched_name and gs_fetched_name != "Невідомо":
+                verified_name, warning = self._verify_author_match(orcid_name_for_verify, gs_fetched_name, orcid, gs_id)
+                if warning:
+                    self.log(warning)
+                if verified_name and verified_name != "Невідомо":
+                    a_name = verified_name
+            
+            # Track candidates needing name entry (handled after all fetching)
+            if a_name == "Невідомо" and (orcid or gs_id) and not is_existing:
+                self.root.after(0, lambda cid=cand_id, oid=orcid, gid=gs_id: self._queue_name_request(cid, oid, gid))
+
+            # Update sources_fetched for this candidate
+            new_sources = []
+            if orcid: new_sources.append('ORCID')
+            if orcid: new_sources.append('OpenAlex')
+            if gs_id: new_sources.append('Scholar')
+
+            if is_existing:
+                existing_sources = set(self.all_candidates[cand_id].get('sources_fetched', []))
+                for s in new_sources: existing_sources.add(s)
+                self.all_candidates[cand_id]['sources_fetched'] = list(existing_sources)
+                self.all_candidates[cand_id]['name'] = a_name
+                self.all_candidates[cand_id]['ids'] = ", ".join(d_ids) if d_ids else self.all_candidates[cand_id].get('ids', '')
+                self.all_candidates[cand_id]['conflict'] = conflict
+            else:
+                self.all_candidates[cand_id] = {
+                    'name': a_name, 'ids': ", ".join(d_ids), 'conflict': conflict,
+                    'papers_uuids': [], 'banned_keywords': [], 'sources_fetched': new_sources
+                }
+
             for pid, pd_item in merged_local.items():
                 u = str(uuid.uuid4()); self.all_candidates[cand_id]['papers_uuids'].append(u)
                 sc, m = heuristic_score(pd_item['title'], pd_item.get('concepts', []), pd_item.get('author_keywords', []), pd_item.get('manual_keywords', ''), self.target_keywords, abstract=pd_item.get('abstract', ''))
                 pd_item.update({'score': sc, 'matched_details': ", ".join(m), 'recent': (pd_item['year'] >= self.cutoff_year), 'cand_id': cand_id})
                 self.all_papers[u] = pd_item
 
-        self.root.after(0, self.notebook.select(1)); self.root.after(0, self.refresh_all_tables); self.log("\nАналіз завершено"); self.root.after(0, lambda: self.run_btn.config(state='normal'))
+        self.root.after(0, self.notebook.select(1))
+        self.root.after(0, self.refresh_all_tables)
+        self.log("\nАналіз завершено")
+        self.root.after(0, lambda: self.run_btn.config(state='normal'))
+        self.root.after(500, self._process_name_queue)
 
     def on_candidate_select(self, e):
         sel = self.tree_sum.selection()
