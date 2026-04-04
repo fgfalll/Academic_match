@@ -184,6 +184,7 @@ class MonCouncilProApp:
         self.filter_recent_var = tk.BooleanVar(value=True); ttk.Checkbutton(fp, text="Відсікати старі", variable=self.filter_recent_var, command=self.refresh_papers_table).pack(side="left", padx=10)
         self.filter_score_var = tk.BooleanVar(value=False); ttk.Checkbutton(fp, text="Тільки з балами", variable=self.filter_score_var, command=self.refresh_papers_table).pack(side="left", padx=5)
         ttk.Button(fp, text="Додати статтю", command=self.open_add_manual_paper).pack(side="right", padx=5)
+        ttk.Button(fp, text="Переіндексувати все", command=self.reindex_manual_papers).pack(side="right", padx=5)
 
         pcols = ("uuid", "year", "recent", "score", "matches", "title", "source")
         self.tree_pap = ttk.Treeview(paf, columns=pcols, show="headings")
@@ -209,6 +210,8 @@ class MonCouncilProApp:
         self.pm = tk.Menu(self.root, tearoff=0)
         self.pm.add_command(label="Деталі", command=self.open_paper_details)
         self.pm.add_command(label="Редагувати ключові слова", command=self.open_manual_tags_dialog)
+        self.pm.add_separator()
+        self.pm.add_command(label="Видалити статтю", command=self.delete_selected_paper)
         self.tree_pap.bind("<Button-3>", lambda e: self.pm.tk_popup(e.x_root, e.y_root))
 
     def build_advice_tab(self):
@@ -286,6 +289,16 @@ class MonCouncilProApp:
     def recalculate_all_scores(self):
         self.cutoff_year = int(self.year_var.get() or datetime.now().year) - 4
         self.log(f"--- ОНОВЛЕННЯ БАЛІВ (Межа: {self.cutoff_year}) ---")
+        for p in self.all_papers.values():
+            cid = p['cand_id']
+            banned = self.all_candidates[cid].get('banned_keywords', [])
+            sc, m = heuristic_score(p['title'], p.get('concepts', []), p.get('author_keywords', []), p.get('manual_keywords', ''), self.target_keywords, banned_keywords=banned, abstract=p.get('abstract', ''))
+            p.update({'score': sc, 'matched_details': ", ".join(m), 'recent': (p['year'] >= self.cutoff_year)})
+        self.refresh_all_tables()
+
+    def reindex_manual_papers(self):
+        self.cutoff_year = int(self.year_var.get() or datetime.now().year) - 4
+        self.log(f"--- ПЕРЕІНДЕКСАЦІЯ (Межа: {self.cutoff_year}) ---")
         for p in self.all_papers.values():
             cid = p['cand_id']
             banned = self.all_candidates[cid].get('banned_keywords', [])
@@ -491,13 +504,49 @@ class MonCouncilProApp:
     def open_manual_tags_dialog(self):
         if not hasattr(self, 'selected_p_uuid'): return
         p = self.all_papers[self.selected_p_uuid]
-        res = simpledialog.askstring("Редагувати ключові слова", f"Введіть ключові слова:\n{p['title'][:60]}...", initialvalue=p['manual_keywords'], parent=self.root)
-        if res is not None:
-            p['manual_keywords'] = res.strip()
-            cid = p['cand_id']
-            banned = self.all_candidates[cid].get('banned_keywords', [])
-            sc, m = heuristic_score(p['title'], p.get('concepts', []), p.get('author_keywords', []), p['manual_keywords'], self.target_keywords, banned_keywords=banned, abstract=p.get('abstract', ''))
-            p.update({'score': sc, 'matched_details': ", ".join(m)}); self.refresh_all_tables()
+        
+        top = tk.Toplevel(self.root)
+        top.title("Редагувати ключові слова")
+        top.geometry("600x300")
+        
+        main_frame = ttk.Frame(top, padding="15")
+        main_frame.pack(fill="both", expand=True)
+        
+        ttk.Label(main_frame, text="Стаття:", font=("Arial", 9, "bold")).pack(anchor="w")
+        ttk.Label(main_frame, text=p['title'][:80] + ("..." if len(p['title']) > 80 else ""), wraplength=570, foreground="gray").pack(anchor="w", pady=(0, 10))
+        
+        kw_frame = ttk.LabelFrame(main_frame, text="Власні ключові слова", padding="10")
+        kw_frame.pack(fill="both", expand=True, pady=(0, 10))
+        
+        ttk.Label(kw_frame, text="Ключові слова (через кому):").pack(anchor="w")
+        mkw_box = tk.Text(kw_frame, height=6, width=70, wrap="word")
+        mkw_box.pack(pady=5, fill="both", expand=True)
+        mkw_box.insert("1.0", p['manual_keywords'])
+        
+        btn_frame = ttk.Frame(main_frame)
+        btn_frame.pack(pady=(0, 5))
+        ttk.Button(btn_frame, text="Скасувати", command=top.destroy).pack(side="left", padx=10)
+        ttk.Button(btn_frame, text="Зберегти", command=lambda: self.save_manual_tags(top, mkw_box, p)).pack(side="left", padx=10)
+    
+    def save_manual_tags(self, top, mkw_box, p):
+        mkw = mkw_box.get("1.0", tk.END).strip()
+        p['manual_keywords'] = mkw
+        cid = p['cand_id']
+        banned = self.all_candidates[cid].get('banned_keywords', [])
+        sc, m = heuristic_score(p['title'], p.get('concepts', []), p.get('author_keywords', []), mkw, self.target_keywords, banned_keywords=banned, abstract=p.get('abstract', ''))
+        p.update({'score': sc, 'matched_details': ", ".join(m)})
+        self.refresh_all_tables()
+        top.destroy()
+
+    def delete_selected_paper(self):
+        if not hasattr(self, 'selected_p_uuid'): return
+        u = self.selected_p_uuid
+        p = self.all_papers[u]
+        if p.get('source') != 'Manual': return
+        cid = p['cand_id']
+        self.all_candidates[cid]['papers_uuids'].remove(u)
+        del self.all_papers[u]
+        self.refresh_all_tables()
 
     def open_paper_details(self):
         if not hasattr(self, 'selected_p_uuid'): return
