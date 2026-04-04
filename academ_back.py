@@ -15,6 +15,12 @@ import re
 import json
 import os
 
+try:
+    from ai_advisor import launch_ai_advisor
+    AI_ADVISOR_AVAILABLE = True
+except ImportError:
+    AI_ADVISOR_AVAILABLE = False
+
 
 # --- НАЛАШТУВАННЯ SCHOLARLY ---
 def setup_scholarly():
@@ -120,6 +126,7 @@ class MonCouncilProApp:
         self.current_author_keywords = []
         self.current_banned_keywords = []
         self.global_banned_keywords = []
+        self.ai_advisor_instance = None
         self.create_widgets(); self.update_keyword_preview()
 
     def create_widgets(self):
@@ -279,6 +286,15 @@ class MonCouncilProApp:
 
         ttk.Button(mid_panel, text="Аналізувати", command=self.generate_advice_strategy).pack(fill="x", pady=5, ipady=3)
         ttk.Button(mid_panel, text="Зберегти звіт (.txt)", command=self.export_advice_report).pack(fill="x", pady=2)
+        
+        sep = ttk.Separator(mid_panel, orient="horizontal")
+        sep.pack(fill="x", pady=10)
+        
+        if AI_ADVISOR_AVAILABLE:
+            self.ai_advisor_btn = ttk.Button(mid_panel, text="AI Консультант", command=self.launch_ai_advisor, state="disabled")
+            self.ai_advisor_btn.pack(fill="x", pady=2, ipady=5)
+        else:
+            ttk.Label(mid_panel, text="(AI недоступний)", foreground="gray").pack(pady=2)
 
         right_panel = ttk.LabelFrame(main_frame, text="Результати аналізу", padding="5")
         right_panel.pack(side="left", fill="both", expand=True, padx=(5, 0))
@@ -310,9 +326,9 @@ class MonCouncilProApp:
         default_name = f"council_{year}_{timestamp}.json"
         return os.path.join(session_dir, default_name)
 
-    def get_session_data(self):
-        return {
-            'version': 2,
+    def get_session_data(self, pin_for_encryption: str = None):
+        data = {
+            'version': 3,
             'saved_at': datetime.now().strftime("%Y-%m-%d_%H-%M-%S"),
             'tab1_inputs': {
                 'council_year': self.year_var.get(),
@@ -330,6 +346,13 @@ class MonCouncilProApp:
                 'all_papers': self.all_papers
             }
         }
+        
+        if self.ai_advisor_instance and hasattr(self.ai_advisor_instance, 'get_state_for_session'):
+            ai_state = self.ai_advisor_instance.get_state_for_session(pin_for_encryption)
+            if ai_state:
+                data['ai_advisor'] = ai_state
+        
+        return data
 
     def load_session_data(self, data):
         if data.get('version', 1) >= 2:
@@ -356,6 +379,32 @@ class MonCouncilProApp:
         self.refresh_all_tables()
         self.notebook.select(1)
         self.log(f"Сесію завантажено: {data.get('saved_at', 'unknown')}")
+        
+        self._loaded_ai_state = data.get('ai_advisor')
+    
+    def restore_ai_advisor_if_loaded(self):
+        if hasattr(self, '_loaded_ai_state') and self._loaded_ai_state:
+            ai_state = self._loaded_ai_state
+            self._loaded_ai_state = None
+            
+            if not self.all_candidates:
+                return
+            
+            if self.ai_advisor_instance is None and AI_ADVISOR_AVAILABLE:
+                selected_cand_ids = list(self.all_candidates.keys())
+                try:
+                    self.ai_advisor_instance = launch_ai_advisor(
+                        parent_window=self.root,
+                        candidates=self.all_candidates,
+                        papers=self.all_papers,
+                        target_keywords=self.target_keywords,
+                        cutoff_year=self.cutoff_year,
+                        global_banned=self.global_banned_keywords,
+                        selected_cand_ids=selected_cand_ids,
+                        restore_state=ai_state
+                    )
+                except Exception as e:
+                    self.log(f"Помилка відновлення AI: {str(e)}")
 
     def save_session(self):
         import os, json
@@ -1536,6 +1585,9 @@ class MonCouncilProApp:
                 
         self.advice_output.insert("1.0", report)
         self.advice_output.config(state="disabled")
+        
+        if AI_ADVISOR_AVAILABLE and hasattr(self, 'ai_advisor_btn'):
+            self.ai_advisor_btn.config(state='normal')
 
     def export_advice_report(self):
         content = self.advice_output.get("1.0", tk.END).strip()
@@ -1547,6 +1599,42 @@ class MonCouncilProApp:
         with open(f_path, 'w', encoding='utf-8') as f:
             f.write(content)
         messagebox.showinfo("Збереження", "Успішно збережено!")
+
+    def launch_ai_advisor(self, restore_state=None):
+        if not AI_ADVISOR_AVAILABLE:
+            messagebox.showerror("Помилка", "Модуль AI Консультанта недоступний")
+            return
+        
+        if not self.all_candidates:
+            messagebox.showwarning("Увага", "Спочатку проведіть аналіз кандидатів")
+            return
+        
+        if self.ai_advisor_instance is not None:
+            try:
+                self.ai_advisor_instance.show_window()
+                return
+            except:
+                self.ai_advisor_instance = None
+        
+        selected_indices = self.advice_listbox.curselection()
+        if selected_indices:
+            selected_cand_ids = [self.advice_cid_map[i] for i in selected_indices]
+        else:
+            selected_cand_ids = list(self.all_candidates.keys())
+        
+        try:
+            self.ai_advisor_instance = launch_ai_advisor(
+                parent_window=self.root,
+                candidates=self.all_candidates,
+                papers=self.all_papers,
+                target_keywords=self.target_keywords,
+                cutoff_year=self.cutoff_year,
+                global_banned=self.global_banned_keywords,
+                selected_cand_ids=selected_cand_ids,
+                restore_state=restore_state
+            )
+        except Exception as e:
+            messagebox.showerror("Помилка AI", f"Не вдалося запустити AI Консультанта:\n{str(e)}")
 
 if __name__ == "__main__":
     root = tk.Tk(); app = MonCouncilProApp(root); root.mainloop()

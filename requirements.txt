@@ -2,3 +2,8 @@ requests
 scholarly
 fake-useragent
 pyinstaller
+cryptography
+litellm
+markdown
+tkhtmlview
+beautifulsoup4
