@@ -61,17 +61,17 @@ def get_author_info_openalex(orcid):
     return "Невідомо"
 
 
-def heuristic_score(title, concepts, author_keywords, manual_tags, target_keywords, banned_keywords=[], abstract=""):
+def heuristic_score(title, concepts, author_keywords, manual_keywords, target_keywords, banned_keywords=[], abstract=""):
     """Алгоритм оцінки релевантності за назвою, ключовими словами та анотацією з урахуванням чорного списку."""
     score = 0
     def norm(txt):
-        return str(txt).lower().replace("’", "'").replace("`", "'").replace("‘", "'") if txt else ""
+        return str(txt).lower().replace("'", "'").replace("`", "'").replace("'", "'") if txt else ""
         
     t_l = norm(title)
     ab_l = norm(abstract)
     c_l = [norm(c) for c in concepts]
     ak_l = [norm(k) for k in author_keywords]
-    m_l = norm(manual_tags)
+    mk_l = norm(manual_keywords)
     matched = []
 
     banned_set = set([norm(b).strip() for b in banned_keywords if b.strip()])
@@ -81,21 +81,18 @@ def heuristic_score(title, concepts, author_keywords, manual_tags, target_keywor
         if not kw or kw in banned_set: continue
         pat = rf'(?u)(?<!\w){re.escape(kw)}(?!\w)'
 
-        if re.search(pat, m_l):
-            score += 5; matched.append(f"'{kw}' (Власна мітка:+5)")
-            continue
-        
         found_in_title = False
         if re.search(pat, t_l):
             score += 5; matched.append(f"'{kw}' (Назва:+5)")
             found_in_title = True
 
-        found_akw = False
-        for ak in ak_l:
-            if re.search(pat, ak):
-                score += 4; matched.append(f"'{kw}' (Кл. слово автора:+4)")
-                found_akw = True; break
-        if found_akw: continue
+        combined_kw = ak_l + [mk_l] if mk_l else ak_l
+        found_kw = False
+        for kw_src in combined_kw:
+            if re.search(pat, kw_src):
+                score += 4; matched.append(f"'{kw}' (Ключове слово:+4)")
+                found_kw = True; break
+        if found_kw: continue
 
         found_c = False
         for c in c_l:
@@ -211,7 +208,7 @@ class MonCouncilProApp:
         
         self.pm = tk.Menu(self.root, tearoff=0)
         self.pm.add_command(label="Деталі", command=self.open_paper_details)
-        self.pm.add_command(label="Мітки", command=self.open_manual_tags_dialog)
+        self.pm.add_command(label="Редагувати ключові слова", command=self.open_manual_tags_dialog)
         self.tree_pap.bind("<Button-3>", lambda e: self.pm.tk_popup(e.x_root, e.y_root))
 
     def build_advice_tab(self):
@@ -292,7 +289,7 @@ class MonCouncilProApp:
         for p in self.all_papers.values():
             cid = p['cand_id']
             banned = self.all_candidates[cid].get('banned_keywords', [])
-            sc, m = heuristic_score(p['title'], p.get('concepts', []), p.get('author_keywords', []), p.get('manual_tags', ''), self.target_keywords, banned_keywords=banned, abstract=p.get('abstract', ''))
+            sc, m = heuristic_score(p['title'], p.get('concepts', []), p.get('author_keywords', []), p.get('manual_keywords', ''), self.target_keywords, banned_keywords=banned, abstract=p.get('abstract', ''))
             p.update({'score': sc, 'matched_details': ", ".join(m), 'recent': (p['year'] >= self.cutoff_year)})
         self.refresh_all_tables()
 
@@ -359,7 +356,7 @@ class MonCouncilProApp:
                                             break
                                             
                                 k = re.sub(r'\W+', '', t.lower())
-                                p_data = {'title': t, 'year': y, 'doi': doi, 'concepts': [], 'author_keywords': [], 'abstract': '', 'source': 'ORCID', 'manual_tags': '', 'authors_full': [], 'journal': '-', 'url': s.get('url', {}).get('value', '') if s.get('url') else (f"https://doi.org/{doi}" if doi else '')}
+                                p_data = {'title': t, 'year': y, 'doi': doi, 'concepts': [], 'author_keywords': [], 'abstract': '', 'source': 'ORCID', 'manual_keywords': '', 'authors_full': [], 'journal': '-', 'url': s.get('url', {}).get('value', '') if s.get('url') else (f"https://doi.org/{doi}" if doi else '')}
                                 merged_local[k] = p_data
                                 if doi: doi_map[doi] = k
                     else: self.log(f"   ! Помилка ORCID HTTP {r.status_code}")
@@ -391,7 +388,7 @@ class MonCouncilProApp:
                                 journal = (pl.get('source') or {}).get('display_name', '-') or '-'
                                 meta = {'concepts': [c.get('display_name', '') for c in ws.get('topics', [])], 'author_keywords': [], 'journal': journal}
                                 if target_k: merged_local[target_k].update(meta)
-                                else: merged_local[k_oa] = {'title': w_title, 'year': ws.get('publication_year', 0), 'doi': w_doi, 'source': 'OpenAlex', 'manual_tags': '', 'abstract': '', 'authors_full': [], **meta}
+                                else: merged_local[k_oa] = {'title': w_title, 'year': ws.get('publication_year', 0), 'doi': w_doi, 'source': 'OpenAlex', 'manual_keywords': '', 'abstract': '', 'authors_full': [], **meta}
                             else:
                                 self.log_status(f"Деталі OpenAlex: {a_name}", f"Обробка {i+1}/{len(works)}")
                                 try:
@@ -410,7 +407,7 @@ class MonCouncilProApp:
                                         merged_local[target_k].update(meta)
                                         if 'OpenAlex' not in merged_local[target_k]['source']: merged_local[target_k]['source'] += " + OA"
                                     else: 
-                                        merged_local[k_oa] = {'title': w_title, 'year': ws.get('publication_year', 0), 'doi': w_doi, 'source': 'OpenAlex', 'manual_tags': '', **meta}
+                                        merged_local[k_oa] = {'title': w_title, 'year': ws.get('publication_year', 0), 'doi': w_doi, 'source': 'OpenAlex', 'manual_keywords': '', **meta}
 
                                     if phd_id:
                                         for auth in ws.get('authorships', []):
@@ -440,14 +437,14 @@ class MonCouncilProApp:
                             if k in merged_local:
                                 merged_local[k]['source'] += " + GS"
                                 if not merged_local[k].get('abstract'): merged_local[k]['abstract'] = ab
-                            else: merged_local[k] = {'title': t, 'year': y, 'concepts': interests, 'author_keywords': [], 'abstract': ab, 'source': 'Scholar', 'manual_tags': '', 'authors_full': [], 'journal': '-', 'url': w.get('pub_url', '')}
+                            else: merged_local[k] = {'title': t, 'year': y, 'concepts': interests, 'author_keywords': [], 'abstract': ab, 'source': 'Scholar', 'manual_keywords': '', 'authors_full': [], 'journal': '-', 'url': w.get('pub_url', '')}
                         except: continue
                 except Exception as e: self.log(f"Помилка Scholar: {str(e)}")
 
             self.all_candidates[cand_id] = {'name': a_name, 'ids': ", ".join(d_ids), 'conflict': conflict, 'papers_uuids': [], 'banned_keywords': []}
             for pid, pd_item in merged_local.items():
                 u = str(uuid.uuid4()); self.all_candidates[cand_id]['papers_uuids'].append(u)
-                sc, m = heuristic_score(pd_item['title'], pd_item.get('concepts', []), pd_item.get('author_keywords', []), pd_item.get('manual_tags', ''), self.target_keywords, abstract=pd_item.get('abstract', ''))
+                sc, m = heuristic_score(pd_item['title'], pd_item.get('concepts', []), pd_item.get('author_keywords', []), pd_item.get('manual_keywords', ''), self.target_keywords, abstract=pd_item.get('abstract', ''))
                 pd_item.update({'score': sc, 'matched_details': ", ".join(m), 'recent': (pd_item['year'] >= self.cutoff_year), 'cand_id': cand_id})
                 self.all_papers[u] = pd_item
 
@@ -483,7 +480,7 @@ class MonCouncilProApp:
             if f_rec and not p['recent']: continue
             if f_sc and p['score'] <= 0: continue
             if sq:
-                txt = (p['title'] + " " + p['manual_tags'] + " " + ",".join(p.get('concepts', []))).lower()
+                txt = (p['title'] + " " + p['manual_keywords'] + " " + ",".join(p.get('concepts', []))).lower()
                 if sq not in txt: continue
             self.tree_pap.insert("", tk.END, values=(u, p['year'], "Так" if p['recent'] else "Ні", p['score'], p['matched_details'], p['title'], p['source']))
 
@@ -494,12 +491,12 @@ class MonCouncilProApp:
     def open_manual_tags_dialog(self):
         if not hasattr(self, 'selected_p_uuid'): return
         p = self.all_papers[self.selected_p_uuid]
-        res = simpledialog.askstring("Мітки", f"Введіть мітки:\n{p['title'][:60]}...", initialvalue=p['manual_tags'], parent=self.root)
+        res = simpledialog.askstring("Редагувати ключові слова", f"Введіть ключові слова:\n{p['title'][:60]}...", initialvalue=p['manual_keywords'], parent=self.root)
         if res is not None:
-            p['manual_tags'] = res.strip()
+            p['manual_keywords'] = res.strip()
             cid = p['cand_id']
             banned = self.all_candidates[cid].get('banned_keywords', [])
-            sc, m = heuristic_score(p['title'], p.get('concepts', []), p.get('author_keywords', []), p['manual_tags'], self.target_keywords, banned_keywords=banned, abstract=p.get('abstract', ''))
+            sc, m = heuristic_score(p['title'], p.get('concepts', []), p.get('author_keywords', []), p['manual_keywords'], self.target_keywords, banned_keywords=banned, abstract=p.get('abstract', ''))
             p.update({'score': sc, 'matched_details': ", ".join(m)}); self.refresh_all_tables()
 
     def open_paper_details(self):
@@ -515,27 +512,103 @@ class MonCouncilProApp:
         c += f"КЛЮЧОВІ СЛОВА АВТОРА: {', '.join(p.get('author_keywords', []))}\n"
         c += f"КЛЮЧОВІ СЛОВА ШІ (OpenAlex): {', '.join(p.get('concepts', []))}\n\n"
         c += f"АНОТАЦІЯ:\n{p.get('abstract', 'Немає анотації.')}\n\n"
-        if p['manual_tags']: c += f"ВЛАСНІ МІТКИ: {p['manual_tags']}\n"
+        if p['manual_keywords']: c += f"ВЛАСНІ КЛЮЧОВІ СЛОВА: {p['manual_keywords']}\n"
         txt.insert("1.0", c); txt.config(state="disabled")
         ttk.Button(top, text="Відкрити в браузері", command=lambda: webbrowser.open(p['url']) if p['url'] else None).pack(pady=10)
 
     def open_add_manual_paper(self):
         if not self.all_candidates: return
-        top = tk.Toplevel(self.root); top.title("Додати статтю"); top.geometry("600x450")
-        tk.Label(top, text="Оберіть автора:").pack(pady=(10, 0))
-        cand_var = tk.StringVar(); cb = ttk.Combobox(top, textvariable=cand_var, state="readonly", width=60)
+        
+        top = tk.Toplevel(self.root)
+        top.title("Додати статтю вручну")
+        top.geometry("650x600")
+        
+        main_frame = ttk.Frame(top, padding="15")
+        main_frame.pack(fill="both", expand=True)
+        
+        author_frame = ttk.LabelFrame(main_frame, text="Автор", padding="10")
+        author_frame.pack(fill="x", pady=(0, 10))
+        
+        cand_var = tk.StringVar()
         cids_list = list(self.all_candidates.keys())
-        cb['values'] = [self.all_candidates[cid]['name'] for cid in cids_list]; cb.pack(pady=5); cb.current(0)
-        tk.Label(top, text="Назва:").pack(); t_box = tk.Text(top, height=3, width=70); t_box.pack(pady=5)
-        tk.Label(top, text="Рік:").pack(); y_ent = ttk.Entry(top); y_ent.insert(0, str(datetime.now().year)); y_ent.pack()
-        tk.Label(top, text="Мітки (через кому):").pack(); tags_ent = ttk.Entry(top, width=70); tags_ent.pack(pady=5)
+        if self.current_cand_filter and self.current_cand_filter in cids_list:
+            default_idx = cids_list.index(self.current_cand_filter)
+        else:
+            default_idx = 0
+        cb = ttk.Combobox(author_frame, textvariable=cand_var, state="readonly", width=60)
+        cb['values'] = [self.all_candidates[cid]['name'] for cid in cids_list]
+        cb.pack()
+        cb.current(default_idx)
+        
+        info_frame = ttk.LabelFrame(main_frame, text="Основна інформація", padding="10")
+        info_frame.pack(fill="x", pady=(0, 10))
+        
+        ttk.Label(info_frame, text="Назва статті:").pack(anchor="w")
+        title_box = tk.Text(info_frame, height=3, width=70)
+        title_box.pack(pady=5)
+        
+        row_frame = ttk.Frame(info_frame)
+        row_frame.pack(fill="x", pady=5)
+        ttk.Label(row_frame, text="Рік:").pack(side="left")
+        y_ent = ttk.Entry(row_frame, width=8)
+        y_ent.pack(side="left", padx=(0, 20))
+        ttk.Label(row_frame, text="Журнал:").pack(side="left")
+        j_ent = ttk.Entry(row_frame, width=35)
+        j_ent.pack(side="left", fill="x", expand=True)
+        
+        url_row_frame = ttk.Frame(info_frame)
+        url_row_frame.pack(fill="x", pady=5)
+        ttk.Label(url_row_frame, text="DOI/URL:").pack(side="left")
+        url_ent = ttk.Entry(url_row_frame, width=50)
+        url_ent.pack(side="left", fill="x", expand=True)
+        
+        kw_frame = ttk.LabelFrame(main_frame, text="Власні ключові слова", padding="10")
+        kw_frame.pack(fill="both", expand=True, pady=(0, 10))
+        
+        ttk.Label(kw_frame, text="Ключові слова (через кому):").pack(anchor="w")
+        mkw_box = tk.Text(kw_frame, height=4, width=70, wrap="word")
+        mkw_box.pack(pady=5, fill="both", expand=True)
+        
+        btn_frame = ttk.Frame(main_frame)
+        btn_frame.pack(pady=10)
+        ttk.Button(btn_frame, text="Скасувати", command=top.destroy).pack(side="left", padx=10)
+        save_btn = ttk.Button(btn_frame, text="Зберегти")
+        save_btn.pack(side="left", padx=10)
+        
+        def validate_and_update():
+            title = title_box.get("1.0", tk.END).strip()
+            year_text = y_ent.get().strip()
+            year_valid = year_text.isdigit() and len(year_text) == 4
+            save_btn.config(state="normal" if (title and year_valid) else "disabled")
+        
+        title_box.bind("<KeyRelease>", lambda e: validate_and_update())
+        y_ent.bind("<KeyRelease>", lambda e: validate_and_update())
+        
         def save():
-            cid = cids_list[cb.current()]; t = t_box.get("1.0", tk.END).strip(); y = int(y_ent.get() or 0); u = str(uuid.uuid4())
+            cid = cids_list[cb.current()]
+            t = title_box.get("1.0", tk.END).strip()
+            y = int(y_ent.get().strip())
+            j = j_ent.get().strip()
+            url = url_ent.get().strip()
+            mkw = mkw_box.get("1.0", tk.END).strip()
+            
             banned = self.all_candidates[cid].get('banned_keywords', [])
-            p_d = {'title': t, 'year': y, 'concepts': [], 'author_keywords': [], 'abstract': '', 'source': 'Manual', 'manual_tags': tags_ent.get().strip(), 'url': '', 'cand_id': cid}
-            sc, m = heuristic_score(t, [], [], p_d['manual_tags'], self.target_keywords, banned_keywords=banned); p_d.update({'score': sc, 'matched_details': ", ".join(m), 'recent': (y >= self.cutoff_year)})
-            self.all_papers[u] = p_d; self.all_candidates[cid]['papers_uuids'].append(u); self.refresh_all_tables(); top.destroy()
-        ttk.Button(top, text="Зберегти", command=save).pack(pady=20)
+            p_d = {
+                'title': t, 'year': y, 'journal': j or '-', 'url': url,
+                'concepts': [], 'author_keywords': [],
+                'manual_keywords': mkw, 'abstract': '',
+                'source': 'Manual', 'cand_id': cid
+            }
+            sc, m = heuristic_score(t, [], [], mkw, self.target_keywords, banned_keywords=banned, abstract='')
+            p_d.update({'score': sc, 'matched_details': ", ".join(m), 'recent': (y >= self.cutoff_year)})
+            u = str(uuid.uuid4())
+            self.all_papers[u] = p_d
+            self.all_candidates[cid]['papers_uuids'].append(u)
+            self.refresh_all_tables()
+            top.destroy()
+        
+        save_btn.config(command=save)
+        validate_and_update()
 
     # --- ВКЛАДКА ПОРАД (ADVICE TAB) ---
 
