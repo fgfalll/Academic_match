@@ -114,13 +114,14 @@ class MonCouncilProApp:
         self.root.geometry("1200x900")
         self.all_candidates = {}; self.all_papers = {}
         self.cutoff_year = 2022; self.target_keywords = []; self.current_cand_filter = None
+        self.years_back_var = tk.IntVar(value=4)
         self.current_author_keywords = []
         self.current_banned_keywords = []
         self.global_banned_keywords = []
         self.create_widgets(); self.update_keyword_preview()
 
     def create_widgets(self):
-        self.notebook = ttk.Notebook(self.root); self.notebook.pack(fill="both", expand=True, padx=10, pady=10)
+        self.notebook = ttk.Notebook(self.root); self.notebook.pack(fill="both", expand=True, padx=5, pady=5)
         self.tab_main = ttk.Frame(self.notebook)
         self.tab_edit = ttk.Frame(self.notebook)
         self.tab_advice = ttk.Frame(self.notebook)
@@ -143,46 +144,51 @@ class MonCouncilProApp:
         menu.tk_popup(event.x_root, event.y_root)
 
     def build_main_tab(self):
-        sf = ttk.LabelFrame(self.tab_main, text="Дані здобувача та керівника", padding="10"); sf.pack(fill="x", padx=10, pady=5)
+        sf = ttk.LabelFrame(self.tab_main, text="Дані здобувача та керівника", padding="5"); sf.pack(fill="x", padx=5, pady=2)
         ttk.Label(sf, text="Рік ради:").grid(row=0, column=0, sticky="w")
         self.year_var = tk.StringVar(value=str(datetime.now().year))
-        ttk.Entry(sf, textvariable=self.year_var, width=10).grid(row=0, column=1, sticky="w", padx=5)
+        ttk.Entry(sf, textvariable=self.year_var, width=10).grid(row=0, column=1, sticky="w", padx=2)
+        years_frame = ttk.Frame(sf)
+        years_frame.grid(row=0, column=2, sticky="w")
+        ttk.Label(years_frame, text="Аналізувати останні:").pack(side="left")
+        ttk.Spinbox(years_frame, from_=1, to=20, width=4, textvariable=self.years_back_var).pack(side="left", padx=4)
+        ttk.Label(years_frame, text="років").pack(side="left")
         
         ttk.Label(sf, text="Здобувач (ORCID / ПІБ):").grid(row=1, column=0, sticky="w")
         self.phd_id_var = tk.StringVar()
-        ttk.Entry(sf, textvariable=self.phd_id_var, width=25).grid(row=1, column=1, sticky="w", padx=5)
-        ttk.Button(sf, text="Отримати терміни", command=self.auto_fetch_keywords).grid(row=1, column=2, sticky="w", padx=10)
+        ttk.Entry(sf, textvariable=self.phd_id_var, width=25).grid(row=1, column=1, sticky="w", padx=2)
+        ttk.Button(sf, text="Отримати терміни", command=self.auto_fetch_keywords).grid(row=1, column=2, sticky="w", padx=2)
 
         ttk.Label(sf, text="Керівник (ORCID / GS / ПІБ):").grid(row=2, column=0, sticky="w")
         self.super_id_var = tk.StringVar()
-        ttk.Entry(sf, textvariable=self.super_id_var, width=25).grid(row=2, column=1, sticky="w", padx=5)
+        ttk.Entry(sf, textvariable=self.super_id_var, width=25).grid(row=2, column=1, sticky="w", padx=2)
         self.deep_analysis_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(sf, text="Аналізувати анотації та співавторів (ORCID/OpenAlex)", variable=self.deep_analysis_var).grid(row=2, column=2, sticky="w", padx=10)
+        ttk.Checkbutton(sf, text="Аналізувати анотації та співавторів (ORCID/OpenAlex)", variable=self.deep_analysis_var).grid(row=2, column=2, sticky="w", padx=2)
         self.deep_scholar_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(sf, text="Глибокий аналіз Scholar (повільніше)", variable=self.deep_scholar_var).grid(row=2, column=3, sticky="w", padx=10)
+        ttk.Checkbutton(sf, text="Глибокий аналіз Scholar (повільніше)", variable=self.deep_scholar_var).grid(row=2, column=3, sticky="w")
 
-        wa = ttk.Frame(self.tab_main); wa.pack(fill="both", expand=True, padx=10, pady=5)
-        inf = ttk.LabelFrame(wa, text="Кандидати (ORCHID\Google Scholar через кому)", padding="10"); inf.pack(side="left", fill="both", expand=True, padx=(0, 5))
+        wa = ttk.Frame(self.tab_main); wa.pack(fill="both", expand=True, padx=5, pady=2)
+        inf = ttk.LabelFrame(wa, text="Кандидати (ORCHID\Google Scholar через кому)", padding="5"); inf.pack(side="left", fill="both", expand=True, padx=(0, 2))
         self.candidates_text = tk.Text(inf, height=5); self.candidates_text.pack(fill="both", expand=True)
         self.candidates_text.insert("1.0", "")
 
-        kwf = ttk.LabelFrame(wa, text="Ключові слова (через кому)", padding="10"); kwf.pack(side="right", fill="both", expand=True, padx=(5, 0))
-        self.keyword_text = tk.Text(kwf, height=3); self.keyword_text.pack(fill="both", expand=True, pady=(0, 5))
+        kwf = ttk.LabelFrame(wa, text="Ключові слова (через кому)", padding="5"); kwf.pack(side="right", fill="both", expand=True, padx=(2, 0))
+        self.keyword_text = tk.Text(kwf, height=3); self.keyword_text.pack(fill="both", expand=True)
         self.keyword_text.insert("1.0", "")
         self.keyword_text.bind("<KeyRelease>", self.update_keyword_preview)
         self.keyword_text.bind("<Button-3>", self.show_text_context_menu)
         self.candidates_text.bind("<Button-3>", self.show_text_context_menu)
         self.parsed_kw_label = ttk.Label(kwf, text="", foreground="#0056b3", wraplength=400); self.parsed_kw_label.pack(fill="x")
 
-        bp = ttk.Frame(self.tab_main); bp.pack(fill="x", padx=10, pady=10)
-        self.run_btn = ttk.Button(bp, text="Почати аналіз", command=self.start_analysis); self.run_btn.pack(side="left", fill="x", expand=True, ipady=5)
-        ttk.Button(bp, text="Перевірка CAPTCHA", command=lambda: webbrowser.open("https://scholar.google.com/scholar?q=test")).pack(side="right", padx=5, ipady=5)
+        bp = ttk.Frame(self.tab_main); bp.pack(fill="x", padx=5, pady=5)
+        self.run_btn = ttk.Button(bp, text="Почати аналіз", command=self.start_analysis); self.run_btn.pack(side="left", fill="x", expand=True, ipady=3)
+        ttk.Button(bp, text="Перевірка CAPTCHA", command=lambda: webbrowser.open("https://scholar.google.com/scholar?q=test")).pack(side="right", padx=2, ipady=3)
 
-        lf = ttk.LabelFrame(self.tab_main, text="Журнал подій", padding="10"); lf.pack(fill="both", expand=True, padx=10, pady=5)
-        self.log_area = scrolledtext.ScrolledText(lf, wrap=tk.WORD, state='disabled', height=6, font=("Consolas", 9)); self.log_area.pack(fill="both", expand=True)
+        lf = ttk.LabelFrame(self.tab_main, text="Журнал подій", padding="5"); lf.pack(fill="both", expand=True, padx=5, pady=2)
+        self.log_area = scrolledtext.ScrolledText(lf, wrap=tk.WORD, state='disabled', height=3, font=("Consolas", 9)); self.log_area.pack(fill="both", expand=True)
 
     def build_edit_tab(self):
-        sumf = ttk.LabelFrame(self.tab_edit, text="Підсумок", padding="10"); sumf.pack(fill="x", padx=10, pady=5)
+        sumf = ttk.LabelFrame(self.tab_edit, text="Підсумок", padding="5"); sumf.pack(fill="x", padx=5, pady=2)
         cols = ("cand_id", "name", "ids", "relevant", "conflict", "status")
         self.tree_sum = ttk.Treeview(sumf, columns=cols, show="headings", height=4)
         for c, t in zip(cols, ["ID", "Кандидат", "Джерела", "Статті 5р", "Конфлікт", "Статус"]): self.tree_sum.heading(c, text=t)
@@ -190,16 +196,16 @@ class MonCouncilProApp:
         self.tree_sum.tag_configure("pass", background="#d4edda"); self.tree_sum.tag_configure("fail", background="#f8d7da")
         self.tree_sum.bind("<<TreeviewSelect>>", self.on_candidate_select)
 
-        paf = ttk.LabelFrame(self.tab_edit, text="Список статей", padding="10"); paf.pack(fill="both", expand=True, padx=10, pady=5)
-        fp = ttk.Frame(paf); fp.pack(fill="x", pady=(0, 10))
-        ttk.Button(fp, text="Всі", command=self.clear_candidate_filter).pack(side="left", padx=5)
+        paf = ttk.LabelFrame(self.tab_edit, text="Список статей", padding="5"); paf.pack(fill="both", expand=True, padx=5, pady=2)
+        fp = ttk.Frame(paf); fp.pack(fill="x", pady=(0, 5))
+        ttk.Button(fp, text="Всі", command=self.clear_candidate_filter).pack(side="left", padx=2)
         self.search_title_var = tk.StringVar()
         ent = ttk.Entry(fp, textvariable=self.search_title_var, width=25); ent.pack(side="left"); ent.bind("<KeyRelease>", lambda e: self.refresh_papers_table())
-        self.filter_recent_var = tk.BooleanVar(value=True); ttk.Checkbutton(fp, text="Відсікати старі", variable=self.filter_recent_var, command=self.refresh_papers_table).pack(side="left", padx=10)
-        self.filter_score_var = tk.BooleanVar(value=False); ttk.Checkbutton(fp, text="Тільки з балами", variable=self.filter_score_var, command=self.refresh_papers_table).pack(side="left", padx=5)
-        ttk.Button(fp, text="Виключити слова", command=self.open_global_ban_keywords).pack(side="left", padx=10)
-        ttk.Button(fp, text="Додати статтю", command=self.open_add_manual_paper).pack(side="right", padx=5)
-        ttk.Button(fp, text="Переіндексувати все", command=self.reindex_manual_papers).pack(side="right", padx=5)
+        self.filter_recent_var = tk.BooleanVar(value=True); ttk.Checkbutton(fp, text="Відсікати старі", variable=self.filter_recent_var, command=self.refresh_papers_table).pack(side="left", padx=2)
+        self.filter_score_var = tk.BooleanVar(value=False); ttk.Checkbutton(fp, text="Тільки з балами", variable=self.filter_score_var, command=self.refresh_papers_table).pack(side="left", padx=2)
+        ttk.Button(fp, text="Виключити слова", command=self.open_global_ban_keywords).pack(side="left", padx=2)
+        ttk.Button(fp, text="Додати статтю", command=self.open_add_manual_paper).pack(side="right", padx=2)
+        ttk.Button(fp, text="Переіндексувати все", command=self.reindex_manual_papers).pack(side="right", padx=2)
 
         pcols = ("uuid", "year", "recent", "score", "matches", "title", "source")
         self.tree_pap = ttk.Treeview(paf, columns=pcols, show="headings")
@@ -229,10 +235,10 @@ class MonCouncilProApp:
 
     def build_advice_tab(self):
         main_frame = ttk.Frame(self.tab_advice)
-        main_frame.pack(fill="both", expand=True, padx=10, pady=10)
+        main_frame.pack(fill="both", expand=True, padx=5, pady=5)
 
         left_panel = ttk.LabelFrame(main_frame, text="Кандидати", padding="5")
-        left_panel.pack(side="left", fill="y", padx=(0, 10))
+        left_panel.pack(side="left", fill="y", padx=(0, 5))
 
         list_frame = ttk.Frame(left_panel)
         list_frame.pack(fill="both", expand=True)
@@ -250,19 +256,19 @@ class MonCouncilProApp:
         list_frame.grid_columnconfigure(0, weight=1)
 
         mid_panel = ttk.Frame(main_frame)
-        mid_panel.pack(side="left", fill="y", padx=5)
+        mid_panel.pack(side="left", fill="y", padx=2)
 
         ban_frame = ttk.LabelFrame(mid_panel, text="Виключення слів", padding="5")
-        ban_frame.pack(fill="x", pady=(0, 10))
+        ban_frame.pack(fill="x", pady=(0, 5))
         
-        ttk.Label(ban_frame, text="Слова, які не враховуються\nдля виділених кандидатів.", wraplength=200).pack(pady=5)
-        ttk.Button(ban_frame, text="Список виключень", command=self.open_blacklist_window).pack(fill="x", pady=5, ipady=3)
+        ttk.Label(ban_frame, text="Слова, які не враховуються\nдля виділених кандидатів.", wraplength=200).pack(pady=2)
+        ttk.Button(ban_frame, text="Список виключень", command=self.open_blacklist_window).pack(fill="x", pady=2, ipady=3)
 
-        ttk.Button(mid_panel, text="Аналізувати", command=self.generate_advice_strategy).pack(fill="x", pady=10, ipady=5)
-        ttk.Button(mid_panel, text="Зберегти звіт (.txt)", command=self.export_advice_report).pack(fill="x", pady=5)
+        ttk.Button(mid_panel, text="Аналізувати", command=self.generate_advice_strategy).pack(fill="x", pady=5, ipady=3)
+        ttk.Button(mid_panel, text="Зберегти звіт (.txt)", command=self.export_advice_report).pack(fill="x", pady=2)
 
         right_panel = ttk.LabelFrame(main_frame, text="Результати аналізу", padding="5")
-        right_panel.pack(side="left", fill="both", expand=True, padx=(10, 0))
+        right_panel.pack(side="left", fill="both", expand=True, padx=(5, 0))
         
         self.advice_output = scrolledtext.ScrolledText(right_panel, wrap=tk.WORD, font=("Arial", 10))
         self.advice_output.pack(fill="both", expand=True)
@@ -300,7 +306,7 @@ class MonCouncilProApp:
         except: pass
 
     def recalculate_all_scores(self):
-        self.cutoff_year = int(self.year_var.get() or datetime.now().year) - 4
+        self.cutoff_year = int(self.year_var.get() or datetime.now().year) - self.years_back_var.get()
         self.log(f"--- ОНОВЛЕННЯ БАЛІВ (Межа: {self.cutoff_year}) ---")
         for p in self.all_papers.values():
             cid = p['cand_id']
@@ -310,7 +316,7 @@ class MonCouncilProApp:
         self.refresh_all_tables()
 
     def reindex_manual_papers(self):
-        self.cutoff_year = int(self.year_var.get() or datetime.now().year) - 4
+        self.cutoff_year = int(self.year_var.get() or datetime.now().year) - self.years_back_var.get()
         self.log(f"--- ПЕРЕІНДЕКСАЦІЯ (Межа: {self.cutoff_year}) ---")
         for p in self.all_papers.values():
             cid = p['cand_id']
@@ -329,7 +335,7 @@ class MonCouncilProApp:
         threading.Thread(target=self.run_algorithm, args=(lines, self.phd_id_var.get().strip().lower(), self.super_id_var.get().strip().lower()), daemon=True).start()
 
     def run_algorithm(self, lines, phd_id, super_id):
-        self.cutoff_year = int(self.year_var.get() or datetime.now().year) - 4
+        self.cutoff_year = int(self.year_var.get() or datetime.now().year) - self.years_back_var.get()
         for idx, line in enumerate(lines):
             cand_id = f"cand_{idx}"
             parts = [p.strip() for p in line.split(',')]
