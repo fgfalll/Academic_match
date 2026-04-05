@@ -109,6 +109,136 @@ def _tavily_search(query: str, num_results: int = 5) -> Dict[str, Any]:
     return result
 
 
+OPENALEX_MAILTO = "your-email@example.com"
+OPENALEX_BASE = "https://api.openalex.org"
+OPENALEX_PER_PAGE = 5
+
+
+def _openalex_get(endpoint: str, params: dict) -> dict:
+    params["mailto"] = OPENALEX_MAILTO
+    params["per_page"] = OPENALEX_PER_PAGE
+    try:
+        resp = requests.get(f"{OPENALEX_BASE}/{endpoint}", params=params, timeout=15)
+        resp.raise_for_status()
+        return resp.json()
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def search_works(query: str, year: int = None, sort: str = None) -> dict:
+    select = (
+        "id,title,publication_year,authorships,cited_by_count,abstract_inverted_index"
+    )
+    params = {"search": query, "select": select}
+    if year:
+        params["filter"] = f"publication_year:{year}"
+    if sort:
+        params["sort"] = sort
+    return _openalex_get("works", params)
+
+
+def search_concepts(query: str) -> dict:
+    params = {"search": query, "select": "id,display_name,level,description"}
+    return _openalex_get("concepts", params)
+
+
+def search_authors(query: str, field: str = None) -> dict:
+    params = {
+        "search": query,
+        "select": "id,display_name,orcid,cited_by_count,h-index,works_count,topics",
+    }
+    if field:
+        params["filter"] = f"topic:{field}"
+    return _openalex_get("authors", params)
+
+
+def _truncate_abstract(abstract_idx: dict, max_words: int = 50) -> str:
+    if not abstract_idx:
+        return ""
+    all_positions = []
+    for word, positions in abstract_idx.items():
+        for pos in positions:
+            all_positions.append((pos, word))
+    all_positions.sort()
+    words = [w for _, w in all_positions[:max_words]]
+    return " ".join(words)
+
+
+def format_works_result(data: dict) -> str:
+    if data.get("error"):
+        return f"OpenAlex error: {data['error']}"
+    results = data.get("results", [])[:OPENALEX_PER_PAGE]
+    if not results:
+        return "No works found."
+    lines = ["=== OpenAlex Works ==="]
+    for w in results:
+        title = w.get("title", "N/A")
+        year = w.get("publication_year", "N/A")
+        cited = w.get("cited_by_count", 0)
+        abstract_idx = w.get("abstract_inverted_index")
+        abstract_preview = _truncate_abstract(abstract_idx, 30) if abstract_idx else ""
+        authors = []
+        for a in w.get("authorships", [])[:3]:
+            author_name = a.get("author", {}).get("display_name", "")
+            if author_name:
+                authors.append(author_name)
+        author_str = ", ".join(authors) if authors else "Unknown"
+        line = f"- {title} ({year}) | Cited: {cited}"
+        if authors:
+            line += f" | Authors: {author_str}"
+        lines.append(line)
+        if abstract_preview:
+            lines.append(f"  Abstract preview: {abstract_preview}...")
+    return "\n".join(lines)
+
+
+def format_concepts_result(data: dict) -> str:
+    if data.get("error"):
+        return f"OpenAlex error: {data['error']}"
+    results = data.get("results", [])[:OPENALEX_PER_PAGE]
+    if not results:
+        return "No concepts found."
+    lines = ["=== OpenAlex Concepts ==="]
+    for c in results:
+        cid = c.get("id", "N/A")
+        name = c.get("display_name", "N/A")
+        level = c.get("level", "N/A")
+        desc = c.get("description", "")
+        desc_preview = desc[:100] + "..." if len(desc) > 100 else desc if desc else ""
+        lines.append(f"- {name} [{cid}] (level={level})")
+        if desc_preview:
+            lines.append(f"  {desc_preview}")
+    return "\n".join(lines)
+
+
+def format_authors_result(data: dict) -> str:
+    if data.get("error"):
+        return f"OpenAlex error: {data['error']}"
+    results = data.get("results", [])[:OPENALEX_PER_PAGE]
+    if not results:
+        return "No authors found."
+    lines = ["=== OpenAlex Authors ==="]
+    for a in results:
+        aid = a.get("id", "N/A")
+        name = a.get("display_name", "N/A")
+        orcid = a.get("orcid", "N/A")
+        cited = a.get("cited_by_count", 0)
+        hindex = a.get("h-index", "N/A")
+        works = a.get("works_count", 0)
+        topics = []
+        for t in a.get("topics", [])[:5]:
+            topic_name = t.get("display_name", "")
+            if topic_name:
+                topics.append(topic_name)
+        topic_str = ", ".join(topics) if topics else "None"
+        lines.append(f"- {name} [{aid}]")
+        lines.append(f"  Citations: {cited} | h-index: {hindex} | Works: {works}")
+        if orcid and orcid != "N/A":
+            lines.append(f"  ORCID: {orcid}")
+        lines.append(f"  Topics: {topic_str}")
+    return "\n".join(lines)
+
+
 def format_search_results(search_result: Dict[str, Any]) -> str:
     if search_result.get("error") and not search_result.get("results"):
         return f"Пошук не вдався: {search_result['error']}"
@@ -500,14 +630,18 @@ class LazyAnalysisData:
         keyword_lower = keyword.lower().strip()
         if not keyword_lower:
             return False
-            
+
         if cand_id and cand_id in self.candidates:
             cand_banned = self.candidates[cand_id].get("banned_keywords", [])
             if keyword_lower in [kw.lower() for kw in cand_banned]:
                 return False
-            self.candidates[cand_id].setdefault("banned_keywords", []).append(keyword.strip())
+            self.candidates[cand_id].setdefault("banned_keywords", []).append(
+                keyword.strip()
+            )
             if self._on_banned_change:
-                self._on_banned_change(self.global_banned) # Could notify differently, but this triggers an update
+                self._on_banned_change(
+                    self.global_banned
+                )  # Could notify differently, but this triggers an update
             return True
         else:
             if keyword_lower in [kw.lower() for kw in self.global_banned]:
@@ -657,7 +791,7 @@ class LazyAnalysisData:
 
 
 class DataRequestParser:
-    REQUEST_PATTERN = r"\[(?:GET|COMPARE|ADD_BANNED|SEARCH):[^\]]+\]"
+    REQUEST_PATTERN = r"\[(?:GET|COMPARE|ADD_BANNED|SEARCH|OPENALEX):[^\]]+\]"
     ARTIFACT_PATTERN = r"\[ARTIFACT:(?:recommendation|summary|comparison|search_result)\].*?(?:\[/ARTIFACT\]|$)"
 
     @classmethod
@@ -729,6 +863,31 @@ class DataRequestParser:
             elif action == "SEARCH":
                 query = ":".join(parts[1:])
                 return f"🌐 **Шукаю в інтернеті:** {query}"
+            elif action == "OPENALEX":
+                endpoint = parts[1] if len(parts) > 1 else ""
+                rest = ":".join(parts[2:]) if len(parts) > 2 else ""
+                if endpoint == "works":
+                    return (
+                        f"📚 **Шукаю роботи:** {rest}"
+                        if rest
+                        else "📚 **Шукаю роботи**"
+                    )
+                elif endpoint == "concepts":
+                    return (
+                        f"🏷️ **Шукаю концепти:** {rest}"
+                        if rest
+                        else "🏷️ **Шукаю концепти**"
+                    )
+                elif endpoint == "authors":
+                    if rest and ":" in rest:
+                        name, field = rest.rsplit(":", 1)
+                        return f"👤 **Шукаю автора:** {name} (тема: {field})"
+                    return (
+                        f"👤 **Шукаю автора:** {rest}"
+                        if rest
+                        else "👤 **Шукаю автора**"
+                    )
+                return f"🔍 **OpenAlex:** {endpoint}"
             return ""
 
         text = re.sub(r"\[(?:GET|COMPARE|SEARCH):[^\]]+\]", replace_get, text)
@@ -1042,6 +1201,12 @@ SYSTEM_PROMPT = """Ти - науковий консультант для ате�
 - Отримати дані про цитування
 - Знайти recent research не в твоїх даних
 - Перевірити якість журналу де опублікована стаття
+
+OPENALEX API (використовуй для детальних даних про авторів):
+[OPENALEX:works:search term] - search scientific papers on OpenAlex
+[OPENALEX:concepts:field name] - get OpenAlex concept ID for a field
+[OPENALEX:authors:author name] - find author ID and detailed citation metrics
+[OPENALEX:authors:author name:field] - find author filtered by concept/field
 
 Приклади:
 [SEARCH:CCUS carbon capture storage latest research 2024]
@@ -1471,9 +1636,13 @@ class AIAdvisorApp:
         self._messages_html = []
         self._streaming_buffer = ""
         self._thinking_index = -1
-        self._user_scrolled_up = False   # True when user manually scrolled away from bottom
+        self._user_scrolled_up = (
+            False  # True when user manually scrolled away from bottom
+        )
         self._saved_yview = 0.0
-        self._last_stream_word_count = 0  # tracks words rendered so far during streaming
+        self._last_stream_word_count = (
+            0  # tracks words rendered so far during streaming
+        )
         self.chat_display = tkinterweb.HtmlFrame(chat_frame)
         # Do NOT use on_done_loading – it fires unreliably when load_html is called
         # rapidly during streaming and causes jump-to-top artefacts.
@@ -1643,7 +1812,9 @@ class AIAdvisorApp:
                     if len(parts) == 1:
                         detailed = self.analysis_data.get_detailed(cand_id_clean)
                         if detailed:
-                            results[f"GET:{cand_id}"] = self._format_detailed_candidate(detailed)
+                            results[f"GET:{cand_id}"] = self._format_detailed_candidate(
+                                detailed
+                            )
 
                     elif len(parts) == 2:
                         subtype = parts[1]
@@ -1652,15 +1823,21 @@ class AIAdvisorApp:
                                 cand_id_clean
                             )
                             if brief:
-                                results[f"GET:{cand_id}"] = self._format_brief_summary(brief)
+                                results[f"GET:{cand_id}"] = self._format_brief_summary(
+                                    brief
+                                )
                         elif subtype == "papers":
                             papers = self.analysis_data.get_papers_by_year(
                                 cand_id_clean
                             )
                             if papers:
-                                results[f"GET:{cand_id}"] = self._format_papers_by_year(papers)
+                                results[f"GET:{cand_id}"] = self._format_papers_by_year(
+                                    papers
+                                )
                         elif subtype == "BANNED":
-                            banned = self.analysis_data.get_banned_keywords(cand_id_clean)
+                            banned = self.analysis_data.get_banned_keywords(
+                                cand_id_clean
+                            )
                             results[f"GET:{cand_id}"] = (
                                 f"Виключені ключові слова ({len(banned)}): {', '.join(banned) if banned else 'немає'}"
                             )
@@ -1669,7 +1846,9 @@ class AIAdvisorApp:
                         year = int(parts[2])
                         papers = self.analysis_data.get_papers_by_year(cand_id_clean)
                         if year in papers:
-                            results[f"GET:{cand_id}"] = self._format_year_stats(papers[year])
+                            results[f"GET:{cand_id}"] = self._format_year_stats(
+                                papers[year]
+                            )
 
                     elif len(parts) == 4:
                         year = int(parts[2])
@@ -1690,7 +1869,9 @@ class AIAdvisorApp:
                 for item in ids:
                     if ":" in item:
                         cand_id, keyword = item.split(":", 1)
-                        success = self.analysis_data.add_banned_keyword(keyword, cand_id)
+                        success = self.analysis_data.add_banned_keyword(
+                            keyword, cand_id
+                        )
                         name = self.analysis_data.get_name(cand_id)
                         results[f"ADD_BANNED:{item}"] = (
                             f"Додано '{keyword}' до виключень кандидата {name}"
@@ -1738,6 +1919,41 @@ class AIAdvisorApp:
                             }
                         ]: self._update_artifacts_listbox(a),
                     )
+
+            elif action == "OPENALEX":
+                for query in ids:
+                    parts = query.split(":", 1)
+                    endpoint = parts[0]
+                    rest = parts[1] if len(parts) > 1 else ""
+
+                    if endpoint == "works":
+                        subparts = rest.rsplit(":", 2)
+                        search_term = subparts[0]
+                        year = (
+                            int(subparts[1])
+                            if len(subparts) > 1 and subparts[1].isdigit()
+                            else None
+                        )
+                        sort = (
+                            subparts[2]
+                            if len(subparts) > 2
+                            else "publication_year:desc"
+                        )
+                        result = search_works(search_term, year, sort)
+                        formatted = format_works_result(result)
+                    elif endpoint == "concepts":
+                        result = search_concepts(rest)
+                        formatted = format_concepts_result(result)
+                    elif endpoint == "authors":
+                        subparts = rest.rsplit(":", 1)
+                        search_term = subparts[0]
+                        field = subparts[1] if len(subparts) > 1 else None
+                        result = search_authors(search_term, field)
+                        formatted = format_authors_result(result)
+                    else:
+                        formatted = f"Unknown endpoint: {endpoint}"
+
+                    results[f"OPENALEX:{query}"] = formatted
 
         return results
 
@@ -1891,7 +2107,9 @@ Top ключові слова: {", ".join(brief.top_keywords[:8]) if brief.top_k
             requests = DataRequestParser.parse(response)
 
             if not requests:
-                self.window.after(0, lambda r=response: self._finalize_streaming_message(r))
+                self.window.after(
+                    0, lambda r=response: self._finalize_streaming_message(r)
+                )
             else:
                 parsed = DataRequestParser.extract_ids(requests)
                 request_names = []
@@ -1932,7 +2150,9 @@ Top ключові слова: {", ".join(brief.top_keywords[:8]) if brief.top_k
 
                 messages.append({"role": "user", "content": continuation_prompt})
 
-                self.window.after(0, lambda: self._show_thinking("Думаємо... Аналізуємо дані"))
+                self.window.after(
+                    0, lambda: self._show_thinking("Думаємо... Аналізуємо дані")
+                )
 
                 full_response2 = []
                 for chunk in self.ai_provider.chat_stream(messages):
@@ -1968,7 +2188,11 @@ Top ключові слова: {", ".join(brief.top_keywords[:8]) if brief.top_k
 
     def _show_thinking(self, msg="Думаємо..."):
         thinking_html = f'<div class="system-msg" style="color: #666; font-style: italic;">{msg}</div>'
-        if hasattr(self, "_thinking_index") and self._thinking_index >= 0 and self._thinking_index < len(self._messages_html):
+        if (
+            hasattr(self, "_thinking_index")
+            and self._thinking_index >= 0
+            and self._thinking_index < len(self._messages_html)
+        ):
             self._messages_html[self._thinking_index] = thinking_html
         else:
             self._messages_html.append(thinking_html)
@@ -1977,8 +2201,10 @@ Top ключові слова: {", ".join(brief.top_keywords[:8]) if brief.top_k
         self._do_load_html()
 
     def _hide_thinking(self):
-        if hasattr(self, "_thinking_index") and self._thinking_index >= 0 and self._thinking_index < len(
-            self._messages_html
+        if (
+            hasattr(self, "_thinking_index")
+            and self._thinking_index >= 0
+            and self._thinking_index < len(self._messages_html)
         ):
             self._messages_html.pop(self._thinking_index)
             self._thinking_index = -1
@@ -2152,8 +2378,12 @@ th { background: #f8f8f8; }
         for widget in targets:
             try:
                 widget.bind("<MouseWheel>", self._on_chat_mousewheel, add="+")
-                widget.bind("<Button-4>", self._on_chat_scroll_up, add="+")   # Linux scroll-up
-                widget.bind("<Button-5>", self._on_chat_scroll_down, add="+")  # Linux scroll-down
+                widget.bind(
+                    "<Button-4>", self._on_chat_scroll_up, add="+"
+                )  # Linux scroll-up
+                widget.bind(
+                    "<Button-5>", self._on_chat_scroll_down, add="+"
+                )  # Linux scroll-down
             except Exception:
                 pass
 
