@@ -48,8 +48,9 @@ def encrypt_with_pin(data: str, pin: str) -> str:
     cipher = Cipher(algorithms.AES(aes_key), modes.CBC(iv), backend=default_backend())
     encryptor = cipher.encryptor()
 
-    padded_data = data + " " * (16 - len(data) % 16)
-    ciphertext = encryptor.update(padded_data.encode("utf-8")) + encryptor.finalize()
+    padding_length = 16 - len(data) % 16
+    padded_data = data.encode("utf-8") + bytes([padding_length] * padding_length)
+    ciphertext = encryptor.update(padded_data) + encryptor.finalize()
 
     return base64.b64encode(iv + ciphertext).decode("utf-8")
 
@@ -73,7 +74,8 @@ def decrypt_with_pin(encrypted_data: str, pin: str) -> str:
         decryptor = cipher.decryptor()
         padded_plaintext = decryptor.update(ciphertext) + decryptor.finalize()
 
-        return padded_plaintext.decode("utf-8").rstrip()
+        padding_length = padded_plaintext[-1]
+        return padded_plaintext[:-padding_length].decode("utf-8")
     except Exception:
         return None
 

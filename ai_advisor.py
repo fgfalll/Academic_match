@@ -812,6 +812,43 @@ class DataRequestParser:
         return re.sub(cls.ARTIFACT_PATTERN, "", text, flags=re.DOTALL)
 
     @classmethod
+    def convert_artifacts_to_html(cls, text: str) -> Tuple[str, List[Dict[str, str]]]:
+        if not text:
+            return "", []
+        artifacts = cls.parse_artifacts(text)
+        if not artifacts:
+            return text, []
+
+        type_labels = {
+            "recommendation": "📋 Рекомендація",
+            "summary": "📝 Підсумок",
+            "comparison": "📊 Порівняння",
+            "search_result": "🔍 Результат пошуку",
+        }
+
+        md = markdown.Markdown(
+            extensions=["tables", "fenced_code", "nl2br", "sane_lists"],
+            output_format="html",
+        )
+
+        result = text
+        artifact_idx = 0
+        pattern = r"\[ARTIFACT:(recommendation|summary|comparison|search_result)\](.*?)\[/ARTIFACT\]"
+
+        def replacer(match):
+            nonlocal artifact_idx
+            artifact_type = match.group(1)
+            content = match.group(2).strip()
+            content_html = md.convert(content)
+            label = type_labels.get(artifact_type, artifact_type)
+            idx = artifact_idx
+            artifact_idx += 1
+            return f'<div class="artifact-block {artifact_type}"><span class="artifact-label">{label}</span><div class="artifact-content">{content_html}</div></div>'
+
+        result = re.sub(pattern, replacer, text, flags=re.DOTALL)
+        return result, artifacts
+
+    @classmethod
     def remove_markers_for_display(
         cls, text: str, id_to_name: Dict[str, str] = None
     ) -> str:
@@ -1483,22 +1520,17 @@ class AIAdvisorApp:
             return None
 
         api_key_to_store = self.current_api_key
-        chat_history_to_store = self.chat_history
 
         if pin:
             api_key_to_store = "enc:" + encrypt_with_embedded_pin_hash(
                 self.current_api_key, pin
-            )
-            chat_history_json = json.dumps(self.chat_history, ensure_ascii=False)
-            chat_history_to_store = "enc:" + encrypt_with_embedded_pin_hash(
-                chat_history_json, pin
             )
 
         state = {
             "provider": self.current_provider,
             "model": self.current_model,
             "api_key": api_key_to_store,
-            "chat_history": chat_history_to_store,
+            "chat_history": self.chat_history,
             "artifacts": self.artifacts,
         }
 
@@ -1511,7 +1543,7 @@ class AIAdvisorApp:
         provider = state.get("provider")
         model = state.get("model")
         api_key_encrypted = state.get("api_key")
-        chat_history_encrypted = state.get("chat_history")
+        chat_history = state.get("chat_history")
         artifacts = state.get("artifacts", [])
 
         if api_key_encrypted:
@@ -1526,16 +1558,8 @@ class AIAdvisorApp:
             else:
                 return False
 
-        if chat_history_encrypted:
-            if pin and chat_history_encrypted.startswith("enc:"):
-                try:
-                    _, chat_history_json = decrypt_with_embedded_pin_hash(
-                        chat_history_encrypted[4:], pin
-                    )
-                    if chat_history_json:
-                        self.chat_history = json.loads(chat_history_json)
-                except:
-                    pass
+        if chat_history:
+            self.chat_history = chat_history
 
         if artifacts:
             self.artifacts = artifacts
@@ -1573,7 +1597,9 @@ class AIAdvisorApp:
                         model,
                     )
                     if self._restore_state.get("chat_history"):
-                        self.chat_history = self._restore_state["chat_history"]
+                        restored_history = self._restore_state["chat_history"]
+                        if isinstance(restored_history, list):
+                            self.chat_history = restored_history
                     if self._restore_state.get("artifacts"):
                         self.artifacts = self._restore_state["artifacts"]
                     self._restore_state = None
@@ -1877,6 +1903,7 @@ class AIAdvisorApp:
         self.chat_display = tkinterweb.HtmlFrame(chat_frame)
         # Do NOT use on_done_loading – it fires unreliably when load_html is called
         # rapidly during streaming and causes jump-to-top artefacts.
+        self.chat_display.on_link_click = self._on_artifact_link_click
 
         self.chat_context_menu = tk.Menu(self.window, tearoff=0)
         self.chat_context_menu.add_command(
@@ -1922,6 +1949,7 @@ class AIAdvisorApp:
         # Bind scroll events so we can detect when the user scrolls up manually
         self.chat_display.after(200, self._bind_chat_scroll)
         self.chat_display.bind("<Button-3>", self._show_chat_context_menu)
+        self.chat_display.bind("<Escape>", lambda e: self._do_load_html())
 
         right_frame = ttk.Frame(middle_paned)
         middle_paned.add(right_frame, weight=2)
@@ -2037,6 +2065,8 @@ class AIAdvisorApp:
         self.chat_input.delete("1.0", tk.END)
         self._append_chat("user", msg)
 
+        if not isinstance(self.chat_history, list):
+            self.chat_history = []
         self.chat_history.append({"role": "user", "content": msg})
 
         self.ai_responding = True
@@ -2373,13 +2403,14 @@ Top ключові слова: {", ".join(brief.top_keywords[:8]) if brief.top_k
 
             self.window.after(0, lambda: self._hide_thinking())
 
-            artifacts = DataRequestParser.parse_artifacts(response)
+            response, artifacts = DataRequestParser.convert_artifacts_to_html(response)
             if artifacts:
+                if not isinstance(self.artifacts, list):
+                    self.artifacts = []
                 self.artifacts.extend(artifacts)
                 self.window.after(
                     0, lambda a=artifacts: self._update_artifacts_listbox(a)
                 )
-                response = DataRequestParser.remove_artifacts(response)
 
             requests = DataRequestParser.parse(response)
 
@@ -2450,8 +2481,12 @@ Top ключові слова: {", ".join(brief.top_keywords[:8]) if brief.top_k
 
                 self.window.after(0, lambda: self._hide_thinking())
 
-                artifacts2 = DataRequestParser.parse_artifacts(response2)
+                response2, artifacts2 = DataRequestParser.convert_artifacts_to_html(
+                    response2
+                )
                 if artifacts2:
+                    if not isinstance(self.artifacts, list):
+                        self.artifacts = []
                     self.artifacts.extend(artifacts2)
                     self.window.after(
                         0, lambda a=artifacts2: self._update_artifacts_listbox(a)
@@ -2544,6 +2579,68 @@ ul, ol { margin: 5px 0 5px 20px; padding: 0; }
 li { margin: 3px 0; }
 a { color: #0066cc; text-decoration: none; }
 a:hover { text-decoration: underline; }
+.artifact-link { 
+    color: #d35400; 
+    background: #fdf2e9; 
+    padding: 2px 8px; 
+    border-radius: 4px; 
+    font-size: 12px;
+    cursor: pointer;
+}
+.artifact-link:hover { 
+    background: #fdebd0; 
+    text-decoration: none;
+}
+.artifact-block {
+    background: #fff8f0;
+    border: 1px solid #e8d4c4;
+    border-radius: 6px;
+    padding: 12px;
+    margin: 10px 0;
+}
+.artifact-block.recommendation {
+    background: #f0fff0;
+    border-left: 4px solid #27ae60;
+}
+.artifact-block.recommendation:hover {
+    background: #e8f8e8;
+}
+.artifact-block.summary {
+    background: #f0f0ff;
+    border-left: 4px solid #2980b9;
+}
+.artifact-block.summary:hover {
+    background: #e8e8ff;
+}
+.artifact-block.comparison {
+    background: #fff0f0;
+    border-left: 4px solid #c0392b;
+}
+.artifact-block.comparison:hover {
+    background: #ffe8e8;
+}
+.artifact-block.search_result {
+    background: #fff8f0;
+    border-left: 4px solid #d35400;
+}
+.artifact-block.search_result:hover {
+    background: #fef5eb;
+}
+.artifact-label {
+    font-weight: bold;
+    font-size: 13px;
+    display: block;
+    margin-bottom: 8px;
+}
+.recommendation .artifact-label { color: #27ae60; }
+.summary .artifact-label { color: #2980b9; }
+.comparison .artifact-label { color: #c0392b; }
+.search_result .artifact-label { color: #d35400; }
+.artifact-content {
+    color: #333;
+    font-size: 13px;
+    line-height: 1.5;
+}
 code {
     background: #f0f0f0;
     padding: 1px 5px;
@@ -2809,12 +2906,25 @@ th { background: #f8f8f8; }
             self.artifacts_visible = True
             self.view_menu.entryconfigure(0, label="Сховати артефакти")
 
-    def _on_artifact_click(self, event=None):
-        sel = self.artifacts_listbox.curselection()
-        if not sel:
-            return
-        idx = sel[0]
-        if idx >= len(self.artifacts):
+    def _on_artifact_link_click(self, url):
+        import re
+
+        if not url:
+            return True
+        match = re.search(r"artifact://(\d+)", url)
+        if not match:
+            return True
+        try:
+            idx = int(match.group(1))
+        except (ValueError, IndexError):
+            return True
+        if not self.artifacts or idx >= len(self.artifacts):
+            return True
+        self._show_artifact_dialog(idx)
+        return True
+
+    def _show_artifact_dialog(self, idx):
+        if not self.artifacts or idx >= len(self.artifacts):
             return
         artifact = self.artifacts[idx]
         dialog = tk.Toplevel(self.window)
@@ -2842,6 +2952,15 @@ th { background: #f8f8f8; }
             content = f"{content}\n\nДжерело: {artifact['source']}"
         text.insert("1.0", content if content else "(порожній артефакт)")
         text.config(state="disabled")
+
+    def _on_artifact_click(self, event=None):
+        sel = self.artifacts_listbox.curselection()
+        if not sel:
+            return
+        idx = sel[0]
+        if not self.artifacts or idx >= len(self.artifacts):
+            return
+        self._show_artifact_dialog(idx)
 
     def _export_artifacts(self):
         if not self.artifacts:

@@ -739,7 +739,6 @@ class MonCouncilProApp:
 
         ai_state = data.get("ai_advisor", {})
         api_key_encrypted = ai_state.get("api_key", "")
-        chat_history_encrypted = ai_state.get("chat_history", "")
 
         if api_key_encrypted and api_key_encrypted.startswith("enc:"):
             pin_hash, api_key = decrypt_with_embedded_pin_hash(
@@ -750,16 +749,6 @@ class MonCouncilProApp:
             else:
                 messagebox.showerror("Помилка", "Невірний PIN")
                 return
-
-        if chat_history_encrypted and chat_history_encrypted.startswith("enc:"):
-            _, chat_history_json = decrypt_with_embedded_pin_hash(
-                chat_history_encrypted[4:], pin
-            )
-            if chat_history_json:
-                try:
-                    ai_state["chat_history"] = json.loads(chat_history_json)
-                except:
-                    pass
 
         data["ai_advisor"] = ai_state
 
