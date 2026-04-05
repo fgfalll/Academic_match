@@ -1471,9 +1471,15 @@ class AIAdvisorApp:
         self._messages_html = []
         self._streaming_buffer = ""
         self._thinking_index = -1
+        self._user_scrolled_up = False   # True when user manually scrolled away from bottom
+        self._saved_yview = 0.0
+        self._last_stream_word_count = 0  # tracks words rendered so far during streaming
         self.chat_display = tkinterweb.HtmlFrame(chat_frame)
-        self.chat_display.on_done_loading = self._scroll_chat_to_bottom
+        # Do NOT use on_done_loading – it fires unreliably when load_html is called
+        # rapidly during streaming and causes jump-to-top artefacts.
         self.chat_display.pack(fill="both", expand=True)
+        # Bind scroll events so we can detect when the user scrolls up manually
+        self.chat_display.after(200, self._bind_chat_scroll)
 
         self.chat_context_menu = tk.Menu(self.window, tearoff=0)
         self.chat_context_menu.add_command(
@@ -1596,6 +1602,9 @@ class AIAdvisorApp:
         else:
             msg_html = f'<div class="system-msg">{html_content}</div>'
         self._messages_html.append(msg_html)
+        # A new message always re-enables autoscroll so the latest content
+        # is shown, regardless of where the user had manually scrolled to.
+        self._user_scrolled_up = False
         self._update_html_display()
 
     def _append_html_message(self, content: str, msg_type: str = "ai"):
@@ -1858,7 +1867,7 @@ Top ключові слова: {", ".join(brief.top_keywords[:8]) if brief.top_k
             self.window.after(0, lambda: self._show_thinking())
 
             self._streaming_buffer = ""
-            self.window.after(0, lambda: self._append_message("", "ai"))
+            self.window.after(0, lambda: self._start_streaming())
 
             full_response = []
 
@@ -1964,7 +1973,8 @@ Top ключові слова: {", ".join(brief.top_keywords[:8]) if brief.top_k
         else:
             self._messages_html.append(thinking_html)
             self._thinking_index = len(self._messages_html) - 1
-        self._update_html_display()
+        # Always force a visual update — even during streaming tool-use phases
+        self._do_load_html()
 
     def _hide_thinking(self):
         if hasattr(self, "_thinking_index") and self._thinking_index >= 0 and self._thinking_index < len(
@@ -1972,7 +1982,8 @@ Top ключові слова: {", ".join(brief.top_keywords[:8]) if brief.top_k
         ):
             self._messages_html.pop(self._thinking_index)
             self._thinking_index = -1
-        self._update_html_display()
+        # Always force a visual update — even during streaming tool-use phases
+        self._do_load_html()
 
     def _markdown_to_html(self, text: str) -> str:
         html_body = markdown.markdown(
@@ -1980,23 +1991,24 @@ Top ключові слова: {", ".join(brief.top_keywords[:8]) if brief.top_k
         )
         return html_body
 
-    def _update_html_display(self):
-        full_html = self._build_full_html()
-        
-        # Only capture scroll state if we aren't currently in the middle of loading/rendering
-        # This prevents capture of temporary (0.0, 1.0) scroll states during rapid updates.
-        if not getattr(self, "_is_loading_html", False):
+    def _update_html_display(self, force: bool = False):
+        """Reload the HtmlFrame. Streaming chunks go through _append_streaming_chunk
+        which has its own word-count throttle; all other callers (append_message,
+        show/hide thinking) are infrequent and always need to render."""
+        self._do_load_html()
+
+    def _do_load_html(self):
+        # Save scroll position if the user has manually scrolled up
+        if self._user_scrolled_up:
             try:
                 y = self.chat_display._html.yview()
-                # Consider it auto-scrolling if the bottom is visible
-                self._auto_scroll = (y[1] >= 0.99)
                 self._saved_yview = y[0]
-            except:
-                self._auto_scroll = True
-                self._saved_yview = 0.0
-                
-        self._is_loading_html = True
+            except Exception:
+                pass
+        full_html = self._build_full_html()
         self.chat_display.load_html(full_html)
+        # Scroll after a short delay so tkinterweb has finished layout
+        self.chat_display.after(80, self._do_scroll)
 
     def _build_full_html(self) -> str:
         css = """body {
@@ -2100,40 +2112,105 @@ th { background: #f8f8f8; }
             id_to_name = self.analysis_data._id_to_name
         return DataRequestParser.remove_markers_for_display(text, id_to_name)
 
+    # Number of new words that must accumulate before the streaming display refreshes.
+    # Higher = less frequent redraws, lower = more "typing" feel but risks jiggle.
+    _STREAM_WORDS_PER_REFRESH = 25
+
     def _append_streaming_chunk(self, chunk: str):
         self._streaming_buffer += chunk
+        word_count = len(self._streaming_buffer.split())
+
+        # Always keep _messages_html in sync so any forced render shows latest content
         display_text = self._strip_markers_for_display(self._streaming_buffer)
         html_content = self._markdown_to_html(display_text)
         self._messages_html[-1] = f'<div class="ai-msg">{html_content}</div>'
-        self._update_html_display()
 
-    def _scroll_chat_to_bottom(self):
-        self._is_loading_html = False
-        auto_scroll = getattr(self, "_auto_scroll", True)
-        if auto_scroll:
+        # Update status label with live word count
+        try:
+            self.status_label.config(text=f"АI відповідає... {word_count} слів")
+        except Exception:
+            pass
+
+        # Buffered visual update: only reload the HtmlFrame every N words.
+        # This gives a smooth "typing" effect without the per-token jiggle.
+        if word_count - self._last_stream_word_count >= self._STREAM_WORDS_PER_REFRESH:
+            self._last_stream_word_count = word_count
+            self._do_load_html()
+            self.chat_display.after(80, self._do_scroll)
+
+    def _start_streaming(self):
+        """Called on the main thread when AI streaming begins."""
+        self._last_stream_word_count = 0
+        self._append_message("", "ai")  # clean HTML load + scroll to bottom
+
+    def _bind_chat_scroll(self):
+        """Bind mouse-wheel events to detect when the user manually scrolls up."""
+        inner = getattr(self.chat_display, "_html", None)
+        targets = [self.chat_display]
+        if inner is not None:
+            targets.append(inner)
+        for widget in targets:
             try:
-                self.chat_display._html.yview_moveto(1.0)
-            except:
-                try:
-                    self.chat_display.yview_moveto(1.0)
-                except:
-                    pass
+                widget.bind("<MouseWheel>", self._on_chat_mousewheel, add="+")
+                widget.bind("<Button-4>", self._on_chat_scroll_up, add="+")   # Linux scroll-up
+                widget.bind("<Button-5>", self._on_chat_scroll_down, add="+")  # Linux scroll-down
+            except Exception:
+                pass
+
+    def _on_chat_mousewheel(self, event):
+        """Windows/macOS: negative delta = scroll up."""
+        if event.delta < 0:
+            self._on_chat_scroll_down(event)
         else:
-            saved_y = getattr(self, "_saved_yview", 0.0)
+            self._on_chat_scroll_up(event)
+
+    def _on_chat_scroll_up(self, event=None):
+        """User scrolled toward the top — disable autoscroll."""
+        self._user_scrolled_up = True
+
+    def _on_chat_scroll_down(self, event=None):
+        """User scrolled down — re-enable autoscroll if they reach the bottom."""
+        try:
+            y = self.chat_display._html.yview()
+            if y[1] >= 0.99:
+                self._user_scrolled_up = False
+        except Exception:
+            pass
+
+    def _do_scroll(self):
+        """Execute the actual scroll — called via after() so the HTML has rendered."""
+        if self._user_scrolled_up:
+            saved_y = self._saved_yview
             try:
                 self.chat_display._html.yview_moveto(saved_y)
-            except:
+            except Exception:
                 try:
                     self.chat_display.yview_moveto(saved_y)
-                except:
+                except Exception:
+                    pass
+        else:
+            try:
+                self.chat_display._html.yview_moveto(1.0)
+            except Exception:
+                try:
+                    self.chat_display.yview_moveto(1.0)
+                except Exception:
                     pass
 
     def _finalize_streaming_message(self, final_response: str):
         display_text = self._strip_markers_for_display(final_response)
         html_content = self._markdown_to_html(display_text)
         self._messages_html[-1] = f'<div class="ai-msg">{html_content}</div>'
-        self._update_html_display()
         self._streaming_buffer = ""
+        self._last_stream_word_count = 0
+        # Clear the status label
+        try:
+            self.status_label.config(text="")
+        except Exception:
+            pass
+        # One final load with the complete response, then scroll after layout
+        self._do_load_html()
+        self.chat_display.after(250, self._do_scroll)
 
     def _generate_suggestions(self):
         self.suggestions = [
