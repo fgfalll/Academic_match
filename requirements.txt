@@ -5,5 +5,5 @@ pyinstaller
 cryptography
 litellm
 markdown
-tkhtmlview
+tkinterweb
 beautifulsoup4

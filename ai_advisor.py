@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from collections import Counter
 
 import markdown
-import tkhtmlview
+import tkinterweb
 import litellm
 
 from crypto_utils import (
@@ -489,19 +489,33 @@ class LazyAnalysisData:
             score_comparison=score_comparison,
         )
 
-    def get_banned_keywords(self) -> List[str]:
-        return list(self.global_banned)
+    def get_banned_keywords(self, cand_id: str = None) -> List[str]:
+        banned = list(self.global_banned)
+        if cand_id and cand_id in self.candidates:
+            cand_banned = self.candidates[cand_id].get("banned_keywords", [])
+            banned.extend(cand_banned)
+        return banned
 
-    def add_banned_keyword(self, keyword: str) -> bool:
+    def add_banned_keyword(self, keyword: str, cand_id: str = None) -> bool:
         keyword_lower = keyword.lower().strip()
         if not keyword_lower:
             return False
-        if keyword_lower in [kw.lower() for kw in self.global_banned]:
-            return False
-        self.global_banned.append(keyword.strip())
-        if self._on_banned_change:
-            self._on_banned_change(self.global_banned)
-        return True
+            
+        if cand_id and cand_id in self.candidates:
+            cand_banned = self.candidates[cand_id].get("banned_keywords", [])
+            if keyword_lower in [kw.lower() for kw in cand_banned]:
+                return False
+            self.candidates[cand_id].setdefault("banned_keywords", []).append(keyword.strip())
+            if self._on_banned_change:
+                self._on_banned_change(self.global_banned) # Could notify differently, but this triggers an update
+            return True
+        else:
+            if keyword_lower in [kw.lower() for kw in self.global_banned]:
+                return False
+            self.global_banned.append(keyword.strip())
+            if self._on_banned_change:
+                self._on_banned_change(self.global_banned)
+            return True
 
     def build_initial_context(self, selected_cand_ids: List[str]) -> str:
         selected_briefs = self.get_brief(selected_cand_ids)
@@ -644,7 +658,7 @@ class LazyAnalysisData:
 
 class DataRequestParser:
     REQUEST_PATTERN = r"\[(?:GET|COMPARE|ADD_BANNED|SEARCH):[^\]]+\]"
-    ARTIFACT_PATTERN = r"\[ARTIFACT:(?:recommendation|summary|comparison|search_result)\].*?\[/ARTIFACT\]"
+    ARTIFACT_PATTERN = r"\[ARTIFACT:(?:recommendation|summary|comparison|search_result)\].*?(?:\[/ARTIFACT\]|$)"
 
     @classmethod
     def parse(cls, response: str) -> List[str]:
@@ -680,7 +694,7 @@ class DataRequestParser:
     ) -> str:
         text = cls.remove_artifacts(text)
 
-        text = re.sub(r"\[ADD_BANNED:([^\]]+)\]", r"_(Виключаю: \1)_", text)
+        text = re.sub(r"\[ADD_BANNED:([^\]]+)\]", r"🚫 **Виключаю:** \1", text)
 
         def replace_get(match):
             parts = match.group(0)[1:-1].split(":")
@@ -691,22 +705,30 @@ class DataRequestParser:
             name = id_to_name.get(cand_id, cand_id) if id_to_name else cand_id
 
             if action == "GET":
-                if len(parts) == 2:
-                    return f"_(Отримую дані: {name})_"
+                if cand_id == "BANNED":
+                    return "🔍 **Отримую список виключених слів**"
+                elif len(parts) == 2:
+                    return f"🔍 **Отримую дані:** {name}"
                 elif len(parts) == 3:
                     subtype = parts[2]
-                    return f"_(Отримую: {subtype} для {name})_"
+                    if subtype == "BANNED":
+                        return f"🔍 **Отримую виключені слова:** {name}"
+                    return f"🔍 **Отримую ({subtype}):** {name}"
                 elif len(parts) == 4:
-                    year = parts[2]
-                    return f"_(Отримую публікації за {year} для {name})_"
+                    year = parts[3]
+                    return f"🔍 **Отримую публікації за {year}:** {name}"
+                elif len(parts) == 5:
+                    year = parts[3]
+                    idx = parts[4]
+                    return f"🔍 **Отримую деталі публікації #{idx} за {year}:** {name}"
             elif action == "COMPARE":
                 cand_ids = [
                     id_to_name.get(cid, cid) if id_to_name else cid for cid in parts[1:]
                 ]
-                return f"_(Порівнюю: {', '.join(cand_ids)})_"
+                return f"📊 **Порівнюю:** {', '.join(cand_ids)}"
             elif action == "SEARCH":
                 query = ":".join(parts[1:])
-                return f"_(Шукаю в інтернеті: {query})_"
+                return f"🌐 **Шукаю в інтернеті:** {query}"
             return ""
 
         text = re.sub(r"\[(?:GET|COMPARE|SEARCH):[^\]]+\]", replace_get, text)
@@ -715,9 +737,7 @@ class DataRequestParser:
             for cand_id, name in id_to_name.items():
                 text = text.replace(cand_id, name)
 
-        text = re.sub(r"\s+", " ", text).strip()
-
-        return text
+        return text.strip()
 
     @classmethod
     def sanitize_for_display(cls, text: str, id_to_name: Dict[str, str]) -> str:
@@ -727,25 +747,36 @@ class DataRequestParser:
         for cand_id, name in id_to_name.items():
             text = text.replace(cand_id, name)
 
-        text = re.sub(r"\s+", " ", text).strip()
-
         lines = []
         for line in text.split("\n"):
             line = line.strip()
             if line:
                 lines.append(line)
-        return "\n".join(lines)
+        return "\n\n".join(lines)
 
     @classmethod
-    def extract_ids(cls, requests: List[str]) -> List[Tuple[str, str]]:
+    def extract_ids(cls, requests: List[str]) -> List[Tuple[str, List[str]]]:
         results = []
         for req in requests:
             req_clean = req.strip("[]")
             parts = req_clean.split(":")
             if len(parts) >= 2:
                 action = parts[0]
-                ids_str = parts[1]
-                ids = [x.strip() for x in ids_str.split(",")]
+                if action in ("GET", "SEARCH"):
+                    # The entire rest of the string is the argument
+                    ids = [":".join(parts[1:]).strip()]
+                elif action == "COMPARE":
+                    # Each part is a candidate ID
+                    ids = [x.strip() for x in parts[1:]]
+                elif action == "ADD_BANNED":
+                    if len(parts) == 3:
+                        cand_id = parts[1].strip()
+                        ids = [f"{cand_id}:{x.strip()}" for x in parts[2].split(",")]
+                    else:
+                        ids = [x.strip() for x in parts[1].split(",")]
+                else:
+                    ids_str = parts[1]
+                    ids = [x.strip() for x in ids_str.split(",")]
                 results.append((action, ids))
         return results
 
@@ -998,8 +1029,10 @@ SYSTEM_PROMPT = """Ти - науковий консультант для ате�
 [GET:cand_0:papers:2024] - публікації за конкретний рік
 [GET:cand_0:paper:2024:0] - деталі конкретної публікації (рік, індекс)
 [COMPARE:cand_0:cand_1] - порівняння двох кандидатів
-[GET:BANNED] - отримати список виключених ключових слів
-[ADD_BANNED:слово] - додати ключове слово до виключень
+[GET:BANNED] - отримати список загальних виключених ключових слів
+[GET:cand_0:BANNED] - отримати список виключених ключових слів конкретного кандидата
+[ADD_BANNED:слово] - додати ключове слово до загальних виключень
+[ADD_BANNED:cand_0:слово] - додати ключове слово до виключень конкретного кандидата
 
 ПОШУК В ІНТЕРНЕТІ (ВИКОРИСТОВУЙ АКТИВНО!):
 Використовуй [SEARCH:запит] коли потрібно:
@@ -1023,7 +1056,7 @@ SYSTEM_PROMPT = """Ти - науковий консультант для ате�
 - Будь об'єктивним та конструктивним
 - Вказуй конкретні проблеми та рекомендації
 - Після відповіді пропонуй можливі наступні кроки
-- Якщо рекомендуєш виключити якесь слово - використай [ADD_BANNED:слово]
+- Якщо рекомендуєш виключити якесь слово загалом - використай [ADD_BANNED:слово], якщо лише для кандидата - [ADD_BANNED:cand_0:слово]
 - Якщо потрібна актуальна інформація - використай [SEARCH:запит]
 
 АРТЕФАКТИ:
@@ -1436,8 +1469,32 @@ class AIAdvisorApp:
         self.status_label.pack(anchor="w", pady=(0, 2))
 
         self._messages_html = []
-        self.chat_display = tkhtmlview.HTMLText(chat_frame, html="", wrap="word")
+        self._streaming_buffer = ""
+        self._thinking_index = -1
+        self.chat_display = tkinterweb.HtmlFrame(chat_frame)
+        self.chat_display.on_done_loading = self._scroll_chat_to_bottom
         self.chat_display.pack(fill="both", expand=True)
+
+        self.chat_context_menu = tk.Menu(self.window, tearoff=0)
+        self.chat_context_menu.add_command(
+            label="Копіювати", command=self._copy_chat_selection
+        )
+        self.chat_context_menu.add_command(
+            label="Виділити все", command=self._select_all_chat
+        )
+        self.chat_context_menu.add_separator()
+        self.chat_context_menu.add_command(
+            label="Запитати AI про виділене", command=self._ask_ai_about_selection
+        )
+        self.chat_context_menu.add_command(
+            label="Пояснити виділене", command=self._explain_selection
+        )
+        self.chat_context_menu.add_separator()
+        self.chat_context_menu.add_command(
+            label="Закрити", command=lambda: self.chat_context_menu.unpost()
+        )
+
+        self.chat_display.bind("<Button-3>", self._show_chat_context_menu)
 
         input_frame = ttk.Frame(chat_frame)
         input_frame.pack(fill="x", pady=(3, 0))
@@ -1476,6 +1533,7 @@ class AIAdvisorApp:
 
     def _restore_chat_history(self):
         self._messages_html = []
+        self._thinking_index = -1
         for msg in self.chat_history:
             if msg["role"] == "user":
                 self._append_html_message(msg["content"], "user")
@@ -1576,7 +1634,7 @@ class AIAdvisorApp:
                     if len(parts) == 1:
                         detailed = self.analysis_data.get_detailed(cand_id_clean)
                         if detailed:
-                            results[cand_id] = self._format_detailed_candidate(detailed)
+                            results[f"GET:{cand_id}"] = self._format_detailed_candidate(detailed)
 
                     elif len(parts) == 2:
                         subtype = parts[1]
@@ -1585,19 +1643,24 @@ class AIAdvisorApp:
                                 cand_id_clean
                             )
                             if brief:
-                                results[cand_id] = self._format_brief_summary(brief)
+                                results[f"GET:{cand_id}"] = self._format_brief_summary(brief)
                         elif subtype == "papers":
                             papers = self.analysis_data.get_papers_by_year(
                                 cand_id_clean
                             )
                             if papers:
-                                results[cand_id] = self._format_papers_by_year(papers)
+                                results[f"GET:{cand_id}"] = self._format_papers_by_year(papers)
+                        elif subtype == "BANNED":
+                            banned = self.analysis_data.get_banned_keywords(cand_id_clean)
+                            results[f"GET:{cand_id}"] = (
+                                f"Виключені ключові слова ({len(banned)}): {', '.join(banned) if banned else 'немає'}"
+                            )
 
                     elif len(parts) == 3:
                         year = int(parts[2])
                         papers = self.analysis_data.get_papers_by_year(cand_id_clean)
                         if year in papers:
-                            results[cand_id] = self._format_year_stats(papers[year])
+                            results[f"GET:{cand_id}"] = self._format_year_stats(papers[year])
 
                     elif len(parts) == 4:
                         year = int(parts[2])
@@ -1606,7 +1669,7 @@ class AIAdvisorApp:
                             cand_id_clean, year, idx
                         )
                         if paper:
-                            results[cand_id] = self._format_paper_detail(paper)
+                            results[f"GET:{cand_id}"] = self._format_paper_detail(paper)
 
             elif action == "COMPARE":
                 comparison = self.analysis_data.compare_candidates(ids)
@@ -1615,13 +1678,24 @@ class AIAdvisorApp:
                 )
 
             elif action == "ADD_BANNED":
-                for keyword in ids:
-                    success = self.analysis_data.add_banned_keyword(keyword)
-                    results[f"ADD_BANNED:{keyword}"] = (
-                        f"Додано '{keyword}' до виключень"
-                        if success
-                        else f"'{keyword}' вже є у виключеннях"
-                    )
+                for item in ids:
+                    if ":" in item:
+                        cand_id, keyword = item.split(":", 1)
+                        success = self.analysis_data.add_banned_keyword(keyword, cand_id)
+                        name = self.analysis_data.get_name(cand_id)
+                        results[f"ADD_BANNED:{item}"] = (
+                            f"Додано '{keyword}' до виключень кандидата {name}"
+                            if success
+                            else f"'{keyword}' вже є у виключеннях кандидата {name}"
+                        )
+                    else:
+                        keyword = item
+                        success = self.analysis_data.add_banned_keyword(keyword)
+                        results[f"ADD_BANNED:{keyword}"] = (
+                            f"Додано '{keyword}' до загальних виключень"
+                            if success
+                            else f"'{keyword}' вже є у загальних виключеннях"
+                        )
 
             elif action == "SEARCH":
                 for query in ids:
@@ -1783,10 +1857,14 @@ Top ключові слова: {", ".join(brief.top_keywords[:8]) if brief.top_k
 
             self.window.after(0, lambda: self._show_thinking())
 
+            self._streaming_buffer = ""
+            self.window.after(0, lambda: self._append_message("", "ai"))
+
             full_response = []
 
             for chunk in self.ai_provider.chat_stream(messages):
                 full_response.append(chunk)
+                self.window.after(0, lambda c=chunk: self._append_streaming_chunk(c))
 
             response = "".join(full_response)
             self.chat_history.append({"role": "assistant", "content": response})
@@ -1801,14 +1879,11 @@ Top ключові слова: {", ".join(brief.top_keywords[:8]) if brief.top_k
                 )
                 response = DataRequestParser.remove_artifacts(response)
 
-            response = DataRequestParser.remove_markers_for_display(
-                response, id_to_name
-            )
-            self.window.after(0, lambda r=response: self._append_html_message(r, "ai"))
-
             requests = DataRequestParser.parse(response)
 
-            if requests:
+            if not requests:
+                self.window.after(0, lambda r=response: self._finalize_streaming_message(r))
+            else:
                 parsed = DataRequestParser.extract_ids(requests)
                 request_names = []
                 for action, ids in parsed:
@@ -1825,8 +1900,8 @@ Top ключові слова: {", ".join(brief.top_keywords[:8]) if brief.top_k
 
                 self.window.after(
                     0,
-                    lambda names=request_names: self._append_chat(
-                        "system", f"[ЗАПИТ] Запит даних: {', '.join(names)}"
+                    lambda names=request_names: self._show_thinking(
+                        f"Думаємо... Запит даних: {', '.join(names)}"
                     ),
                 )
 
@@ -1835,11 +1910,8 @@ Top ключові слова: {", ".join(brief.top_keywords[:8]) if brief.top_k
                 for req_id, result in results.items():
                     self.window.after(
                         0,
-                        lambda r=req_id, res=result: self._append_chat(
-                            "system",
-                            f"[ОТРИМАНО] {r}: {res[:80]}..."
-                            if len(res) > 80
-                            else f"[ОТРИМАНО] {r}: {res}",
+                        lambda r=req_id, res=result: self._show_thinking(
+                            f"Думаємо... Отримано: {r}"
                         ),
                     )
 
@@ -1851,11 +1923,14 @@ Top ключові слова: {", ".join(brief.top_keywords[:8]) if brief.top_k
 
                 messages.append({"role": "user", "content": continuation_prompt})
 
-                self.window.after(0, lambda: self._show_thinking())
+                self.window.after(0, lambda: self._show_thinking("Думаємо... Аналізуємо дані"))
 
                 full_response2 = []
                 for chunk in self.ai_provider.chat_stream(messages):
                     full_response2.append(chunk)
+                    self.window.after(
+                        0, lambda c=chunk: self._append_streaming_chunk(c)
+                    )
 
                 response2 = "".join(full_response2)
                 self.chat_history.append({"role": "assistant", "content": response2})
@@ -1868,16 +1943,11 @@ Top ключові слова: {", ".join(brief.top_keywords[:8]) if brief.top_k
                     self.window.after(
                         0, lambda a=artifacts2: self._update_artifacts_listbox(a)
                     )
-                    response2 = DataRequestParser.remove_artifacts(response2)
 
-                response2 = DataRequestParser.remove_markers_for_display(
-                    response2, id_to_name
-                )
+                combined_response = response + "\n\n" + response2
                 self.window.after(
                     0,
-                    lambda r=response2: self._append_html_message(
-                        "\n[Продовження]\n\n" + r, "ai"
-                    ),
+                    lambda r=combined_response: self._finalize_streaming_message(r),
                 )
 
             self.window.after(0, self._generate_suggestions)
@@ -1887,14 +1957,21 @@ Top ключові слова: {", ".join(brief.top_keywords[:8]) if brief.top_k
             error_msg = f"Помилка: {str(e)}"
             self.window.after(0, lambda: self._append_chat("system", error_msg))
 
-    def _show_thinking(self):
-        thinking_html = '<div class="system-msg fade-in">Думаємо<span class="thinking"></span></div>'
-        self._messages_html.append(thinking_html)
+    def _show_thinking(self, msg="Думаємо..."):
+        thinking_html = f'<div class="system-msg" style="color: #666; font-style: italic;">{msg}</div>'
+        if hasattr(self, "_thinking_index") and self._thinking_index >= 0 and self._thinking_index < len(self._messages_html):
+            self._messages_html[self._thinking_index] = thinking_html
+        else:
+            self._messages_html.append(thinking_html)
+            self._thinking_index = len(self._messages_html) - 1
         self._update_html_display()
 
     def _hide_thinking(self):
-        if self._messages_html and "Думаємо" in self._messages_html[-1]:
-            self._messages_html.pop()
+        if hasattr(self, "_thinking_index") and self._thinking_index >= 0 and self._thinking_index < len(
+            self._messages_html
+        ):
+            self._messages_html.pop(self._thinking_index)
+            self._thinking_index = -1
         self._update_html_display()
 
     def _markdown_to_html(self, text: str) -> str:
@@ -1905,7 +1982,21 @@ Top ключові слова: {", ".join(brief.top_keywords[:8]) if brief.top_k
 
     def _update_html_display(self):
         full_html = self._build_full_html()
-        self.chat_display.set_html(full_html)
+        
+        # Only capture scroll state if we aren't currently in the middle of loading/rendering
+        # This prevents capture of temporary (0.0, 1.0) scroll states during rapid updates.
+        if not getattr(self, "_is_loading_html", False):
+            try:
+                y = self.chat_display._html.yview()
+                # Consider it auto-scrolling if the bottom is visible
+                self._auto_scroll = (y[1] >= 0.99)
+                self._saved_yview = y[0]
+            except:
+                self._auto_scroll = True
+                self._saved_yview = 0.0
+                
+        self._is_loading_html = True
+        self.chat_display.load_html(full_html)
 
     def _build_full_html(self) -> str:
         css = """body {
@@ -1943,17 +2034,9 @@ pre {
 table { border-collapse: collapse; margin: 8px 0; width: 100%; }
 th, td { border: 1px solid #ddd; padding: 6px 10px; }
 th { background: #f8f8f8; }
-.user-msg { background: #e3f0ff; padding: 10px 14px; border-radius: 15px 15px 15px 0; margin: 8px 0; max-width: 85%; }
-.ai-msg { background: #f5f5f5; padding: 10px 14px; border-radius: 15px 15px 15px 0; margin: 8px 0; max-width: 85%; }
-.system-msg { color: #888; font-style: italic; padding: 5px 0; font-size: 12px; }
-@keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
-.fade-in { animation: fadeIn 0.3s ease-out; }
-@keyframes thinking {
-    0%, 20% { content: '.'; }
-    40% { content: '..'; }
-    60%, 100% { content: '...'; }
-}
-.thinking::after { content: '...'; animation: thinking 1.5s infinite; }
+.user-msg { background: #e3f0ff; padding: 10px 14px; border-radius: 15px 15px 0 15px; margin: 8px 0; max-width: 85%; margin-left: auto; clear: both; }
+.ai-msg { background: #f5f5f5; padding: 10px 14px; border-radius: 15px 15px 15px 0; margin: 8px 0; max-width: 85%; clear: both; }
+.system-msg { color: #888; font-style: italic; padding: 5px 0; font-size: 12px; clear: both; }
 """
         return f"""<!DOCTYPE html>
 <html>
@@ -1985,172 +2068,72 @@ th { background: #f8f8f8; }
                 content_preview = f"'{artifact['query']}': {content_preview}"
             self.artifacts_listbox.insert(tk.END, f"[{label}] {content_preview}")
 
-    def _reformat_last_ai_message(
-        self, text: str = None, id_to_name: Dict[str, str] = None
-    ):
-        try:
-            print(
-                f"DEBUG reformat: text_len={len(text) if text else 0}, text[:100]={text[:100] if text else 'None'}"
-            )
-            if text is not None:
-                raw_text = text
+    def _show_chat_context_menu(self, event):
+        self.chat_context_menu.tk_popup(event.x_root, event.y_root)
 
-                content = self.chat_display.get("1.0", tk.END)
-                ai_marker = "AI: "
+    def _copy_chat_selection(self):
+        selected = self.chat_display.get_selection()
+        if selected:
+            self.window.clipboard_clear()
+            self.window.clipboard_append(selected)
 
-                last_ai_pos = content.rfind(ai_marker)
-                if last_ai_pos == -1:
-                    return
+    def _select_all_chat(self):
+        self.chat_display.select_all()
 
-                start_pos = content.find("\n", last_ai_pos)
-                if start_pos == -1:
-                    return
-                start_index = self.chat_display.index(f"1.0 + {start_pos} chars")
+    def _ask_ai_about_selection(self):
+        selected = self.chat_display.get_selection()
+        if selected:
+            self.chat_input.delete("1.0", tk.END)
+            self.chat_input.insert("1.0", f"Розкажи більше про: {selected}")
+            self._send_message()
 
-                end_marker = "\nВи:"
-                next_user_pos = content.find(end_marker, start_pos)
+    def _explain_selection(self):
+        selected = self.chat_display.get_selection()
+        if selected:
+            self.chat_input.delete("1.0", tk.END)
+            self.chat_input.insert("1.0", f"Поясни: {selected}")
+            self._send_message()
 
-                if next_user_pos == -1:
-                    next_user_pos = content.rfind("\n[ЗАПИТ]", start_pos)
-                if next_user_pos == -1:
-                    next_user_pos = content.rfind("\n\n", start_pos)
-                if next_user_pos == -1:
-                    next_user_pos = len(content)
+    def _strip_markers_for_display(self, text: str) -> str:
+        id_to_name = None
+        if hasattr(self, "analysis_data") and self.analysis_data:
+            id_to_name = self.analysis_data._id_to_name
+        return DataRequestParser.remove_markers_for_display(text, id_to_name)
 
-                end_index = self.chat_display.index(f"1.0 + {next_user_pos} chars")
+    def _append_streaming_chunk(self, chunk: str):
+        self._streaming_buffer += chunk
+        display_text = self._strip_markers_for_display(self._streaming_buffer)
+        html_content = self._markdown_to_html(display_text)
+        self._messages_html[-1] = f'<div class="ai-msg">{html_content}</div>'
+        self._update_html_display()
 
-                self.chat_display.config(state="normal")
-                self.chat_display.delete(start_index, end_index)
-                self.chat_display.config(state="disabled")
+    def _scroll_chat_to_bottom(self):
+        self._is_loading_html = False
+        auto_scroll = getattr(self, "_auto_scroll", True)
+        if auto_scroll:
+            try:
+                self.chat_display._html.yview_moveto(1.0)
+            except:
+                try:
+                    self.chat_display.yview_moveto(1.0)
+                except:
+                    pass
+        else:
+            saved_y = getattr(self, "_saved_yview", 0.0)
+            try:
+                self.chat_display._html.yview_moveto(saved_y)
+            except:
+                try:
+                    self.chat_display.yview_moveto(saved_y)
+                except:
+                    pass
 
-                self._setup_markdown_tags()
-                self._append_formatted_ai_message(raw_text)
-                return
-
-            content = self.chat_display.get("1.0", tk.END)
-            ai_marker = "AI: "
-
-            last_ai_pos = content.rfind(ai_marker)
-            if last_ai_pos == -1:
-                return
-
-            start_pos = content.find("\n", last_ai_pos)
-            if start_pos == -1:
-                return
-            start_index = self.chat_display.index(f"1.0 + {start_pos} chars")
-
-            end_marker = "\nВи:"
-            next_user_pos = content.find(end_marker, start_pos)
-
-            if next_user_pos == -1:
-                next_user_pos = content.rfind("\n[ЗАПИТ]", start_pos)
-            if next_user_pos == -1:
-                next_user_pos = content.rfind("\n\n", start_pos)
-            if next_user_pos == -1:
-                next_user_pos = len(content)
-
-            end_index = self.chat_display.index(f"1.0 + {next_user_pos} chars")
-
-            raw_text = content[start_pos:next_user_pos]
-            raw_text = raw_text.strip()
-
-            if raw_text.startswith("AI: "):
-                raw_text = raw_text[4:]
-
-            self.chat_display.config(state="normal")
-            self.chat_display.delete(start_index, end_index)
-            self.chat_display.config(state="disabled")
-            self._setup_markdown_tags()
-            self._append_formatted_ai_message(raw_text)
-
-        except Exception as e:
-            pass
-
-    def _append_chunk_to_last_ai_message(self, chunk: str):
-        self.chat_display.config(state="normal")
-        if self.chat_display.tag_ranges("sel"):
-            self.chat_display.tag_remove("sel", "1.0", tk.END)
-        self.chat_display.insert(tk.END, chunk)
-        self.chat_display.see(tk.END)
-        self.chat_display.config(state="disabled")
-
-    def _append_formatted_ai_message(self, text: str):
-        self.chat_display.config(state="normal")
-
-        text = self._normalize_headers(text)
-
-        lines = text.split("\n")
-        in_list = False
-
-        for line in lines:
-            stripped = line.strip()
-
-            if stripped.startswith("# "):
-                self.chat_display.insert(tk.END, stripped[2:] + "\n", "header")
-            elif stripped.startswith("## "):
-                self.chat_display.insert(tk.END, stripped[3:] + "\n", "header2")
-            elif stripped.startswith("### "):
-                self.chat_display.insert(tk.END, stripped[4:] + "\n", "header3")
-            elif stripped.startswith("- ") or stripped.startswith("* "):
-                if not in_list:
-                    in_list = True
-                self.chat_display.insert(tk.END, "  • " + stripped[2:] + "\n", "list")
-            elif re.match(r"^\d+\.\s", stripped):
-                if not in_list:
-                    in_list = True
-                num = re.match(r"^(\d+)\.\s", stripped).group(1)
-                self.chat_display.insert(
-                    tk.END, "  " + num + ". " + stripped[len(num) + 2 :] + "\n", "list"
-                )
-            elif stripped.startswith("```"):
-                pass
-            elif stripped.startswith("_(") and stripped.endswith(")_"):
-                inner = stripped[2:-2]
-                self.chat_display.insert(tk.END, "  [" + inner + "]\n", "system_info")
-            else:
-                if in_list:
-                    self.chat_display.insert(tk.END, "\n", "normal")
-                    in_list = False
-                formatted_line = self._format_inline_markdown(stripped)
-                self.chat_display.insert(tk.END, formatted_line + "\n", "normal")
-
-        self.chat_display.see(tk.END)
-        self.chat_display.config(state="disabled")
-
-    def _normalize_headers(self, text: str) -> str:
-        text = re.sub(r"([^\n])\s*(#{1,3}\s)", r"\1\n\2", text)
-        return text
-
-    def _format_inline_markdown(self, text: str) -> str:
-        result = text
-        patterns = [
-            (r"\*\*(.+?)\*\*", "bold"),
-            (r"__(.+?)__", "bold"),
-            (r"\*(.+?)\*", "italic"),
-            (r"`(.+?)`", "code"),
-        ]
-
-        for pattern, style in patterns:
-            result = re.sub(pattern, r"\1", result)
-
-        return result
-
-    def _setup_markdown_tags(self):
-        self.chat_display.tag_configure("header", font=("Arial", 12, "bold"))
-        self.chat_display.tag_configure("header2", font=("Arial", 11, "bold"))
-        self.chat_display.tag_configure("header3", font=("Arial", 10, "bold"))
-        self.chat_display.tag_configure(
-            "list", font=("Arial", 10), lmargin1=20, lmargin2=20
-        )
-        self.chat_display.tag_configure(
-            "code", font=("Consolas", 9), background="#f0f0f0"
-        )
-        self.chat_display.tag_configure("bold", font=("Arial", 10, "bold"))
-        self.chat_display.tag_configure("italic", font=("Arial", 10, "italic"))
-        self.chat_display.tag_configure("normal", font=("Arial", 10))
-        self.chat_display.tag_configure(
-            "system_info", font=("Arial", 9, "italic"), foreground="#888888"
-        )
+    def _finalize_streaming_message(self, final_response: str):
+        display_text = self._strip_markers_for_display(final_response)
+        html_content = self._markdown_to_html(display_text)
+        self._messages_html[-1] = f'<div class="ai-msg">{html_content}</div>'
+        self._update_html_display()
+        self._streaming_buffer = ""
 
     def _generate_suggestions(self):
         self.suggestions = [
@@ -2368,6 +2351,7 @@ th { background: #f8f8f8; }
         if messagebox.askyesno("Очистити", "Очистити історію чату?"):
             self.chat_history = []
             self._messages_html = []
+            self._thinking_index = -1
             self._add_welcome_message()
 
     def _on_close(self):
