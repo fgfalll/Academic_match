@@ -35,11 +35,11 @@ def derive_aes_key(pin: str) -> bytes:
     kdf = PBKDF2HMAC(
         algorithm=hashes.SHA256(),
         length=32,
-        salt=b'academic_match_salt_v1',
+        salt=b"academic_match_salt_v1",
         iterations=100000,
-        backend=default_backend()
+        backend=default_backend(),
     )
-    return kdf.derive(pin.encode('utf-8'))
+    return kdf.derive(pin.encode("utf-8"))
 
 
 def encrypt_with_pin(data: str, pin: str) -> str:
@@ -47,24 +47,50 @@ def encrypt_with_pin(data: str, pin: str) -> str:
     iv = os.urandom(16)
     cipher = Cipher(algorithms.AES(aes_key), modes.CBC(iv), backend=default_backend())
     encryptor = cipher.encryptor()
-    
-    padded_data = data + ' ' * (16 - len(data) % 16)
-    ciphertext = encryptor.update(padded_data.encode('utf-8')) + encryptor.finalize()
-    
-    return base64.b64encode(iv + ciphertext).decode('utf-8')
+
+    padded_data = data + " " * (16 - len(data) % 16)
+    ciphertext = encryptor.update(padded_data.encode("utf-8")) + encryptor.finalize()
+
+    return base64.b64encode(iv + ciphertext).decode("utf-8")
+
+
+def encrypt_with_embedded_pin_hash(data: str, pin: str) -> str:
+    pin_hash = hash_pin(pin)
+    prehash = f"PINHASH:{pin_hash}:{data}"
+    return encrypt_with_pin(prehash, pin)
 
 
 def decrypt_with_pin(encrypted_data: str, pin: str) -> str:
     try:
         aes_key = derive_aes_key(pin)
-        data = base64.b64decode(encrypted_data.encode('utf-8'))
+        data = base64.b64decode(encrypted_data.encode("utf-8"))
         iv = data[:16]
         ciphertext = data[16:]
-        
-        cipher = Cipher(algorithms.AES(aes_key), modes.CBC(iv), backend=default_backend())
+
+        cipher = Cipher(
+            algorithms.AES(aes_key), modes.CBC(iv), backend=default_backend()
+        )
         decryptor = cipher.decryptor()
         padded_plaintext = decryptor.update(ciphertext) + decryptor.finalize()
-        
-        return padded_plaintext.decode('utf-8').rstrip()
+
+        return padded_plaintext.decode("utf-8").rstrip()
     except Exception:
         return None
+
+
+def decrypt_with_embedded_pin_hash(encrypted_data: str, pin: str) -> tuple:
+    decrypted = decrypt_with_pin(encrypted_data, pin)
+    if decrypted is None:
+        return (None, None)
+
+    if not decrypted.startswith("PINHASH:"):
+        return (None, None)
+
+    try:
+        parts = decrypted.split(":", 2)
+        if len(parts) != 3:
+            return (None, None)
+        prefix, pin_hash, json_data = parts
+        return (pin_hash, json_data)
+    except:
+        return (None, None)
