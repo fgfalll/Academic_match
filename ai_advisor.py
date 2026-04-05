@@ -251,7 +251,21 @@ def format_search_results(search_result: Dict[str, Any]) -> str:
 
 def render_markdown_to_html(text: str) -> str:
     html_body = markdown.markdown(
-        text, extensions=["tables", "fenced_code", "nl2br", "sane_lists"]
+        text,
+        extensions=[
+            "tables",
+            "fenced_code",
+            "nl2br",
+            "sane_lists",
+            "def_list",
+            "abbr",
+            "footnotes",
+            "attr_list",
+            "md_in_html",
+            "pymdownx.mark",
+            "pymdownx.tilde",
+            "pymdownx.caret",
+        ],
     )
 
     html = f"""<!DOCTYPE html>
@@ -345,6 +359,62 @@ hr {{
     0%, 20% {{ content: '.'; }}
     40% {{ content: '..'; }}
     60%, 100% {{ content: '...'; }}
+}}
+mark, .highlight, .hl, span[style*="background"] {{
+    background-color: #fff3cd !important;
+    padding: 1px 4px;
+    border-radius: 3px;
+    display: inline;
+}}
+del {{
+    text-decoration: line-through;
+    color: #c0392b;
+    background-color: #fde8e8;
+    padding: 1px 4px;
+    border-radius: 3px;
+}}
+ins {{
+    text-decoration: underline;
+    color: #27ae60;
+    background-color: #e8f8e8;
+    padding: 1px 4px;
+    border-radius: 3px;
+}}
+sup {{
+    font-size: 0.75em;
+    vertical-align: super;
+    line-height: 0;
+}}
+sub {{
+    font-size: 0.75em;
+    vertical-align: sub;
+    line-height: 0;
+}}
+abbr {{
+    text-decoration: underline dotted;
+    cursor: help;
+}}
+dl {{
+    margin: 10px 0;
+}}
+dt {{
+    font-weight: bold;
+    margin-top: 8px;
+}}
+dd {{
+    margin-left: 20px;
+    color: #555;
+}}
+.footnote-ref {{
+    font-size: 0.75em;
+    vertical-align: super;
+}}
+.footnote {{
+    font-size: 0.85em;
+    color: #666;
+    border-top: 1px solid #eee;
+    padding-top: 8px;
+    margin-top: 12px;
 }}
 </style>
 </head>
@@ -827,7 +897,20 @@ class DataRequestParser:
         }
 
         md = markdown.Markdown(
-            extensions=["tables", "fenced_code", "nl2br", "sane_lists"],
+            extensions=[
+                "tables",
+                "fenced_code",
+                "nl2br",
+                "sane_lists",
+                "def_list",
+                "abbr",
+                "footnotes",
+                "attr_list",
+                "md_in_html",
+                "pymdownx.mark",
+                "pymdownx.tilde",
+                "pymdownx.caret",
+            ],
             output_format="html",
         )
 
@@ -1476,6 +1559,54 @@ OPENALEX API (використовуй для детальних даних пр
 - Якщо [SEARCH...] не знайшов результатів: зазнач це і запропонуй альтернативні запити
 - Якщо кандидатів немає в даних: запропонуй додати їх або використати пошук
 
+===============================================================
+ВИКОРИСТАННЯ МАРКДАУНУ У ВІДПОВІДЯХ
+===============================================================
+Для структурованих та наукових відповідей використовуй РОЗШИРЕНИЙ МАРКДАУН:
+
+ТАБЛИЦІ — для порівнянь, рейтингів, статистики:
+| Кандидат | Публікацій | h-index | Відповідає |
+|----------|------------|---------|------------|
+| Петренко І.І. | 12 | 8 | ✅ Так |
+| Сидоренко О.П. | 3 | 2 | ❌ Ні |
+
+ВИЗНАЧЕННЯ (definition lists) — для термінів і понять:
+Scopus
+: Найбільша наукометрична база даних索引 наукових публікацій
+
+ВИДІЛЕННЯ — для акцентування важливого:
+==обов'язкова вимога==
+
+ЗНОСИНИ (strikethrough) — для позначення недоліків:
+~~публікація у РФ~~  ~~не релевантна темі~~
+
+УВАГА: Для виділення тексту використовуй ТІЛЬКИ ==текст== (подвійні знаки =). HTML теги <mark> або інші способи - НЕ використовуй!
+
+АБРЕВІАТУРИ — для наукових скорочень:
+*[Scopus]* найбільша наукометрична база даних
+*[WoS]* Web of Science Core Collection
+*[PhD]* Doctor of Philosophy / доктор філософії
+*[РСВР]* Разова спеціалізована вчена рада
+
+ПІДЗАПИСИ — для наукових позначень:
+H<sub>2</sub>O  m<sup>3</sup>/kg
+
+ВИНОСКИ — для посилань і джерел:
+Інформація згідно з постановою[^1]
+[^1]: Постанова КМУ № 44 від 12.01.2022
+
+КОД — для прикладів, формул:
+`code` або ```formula block```
+
+ЗАВДАННЯ:
+- Використовуй таблиці при порівнянні кандидатів
+- Використовуй ==highlight== для ключових критеріїв
+- Використовуй ~~strikethrough~~ для позначення недоліків
+- Пояснюй абревіатури при першому вживанні
+- Додавай виноски для посилань на нормативні акти
+- Для підрядків використовуй HTML: <sub>текст</sub>
+
+===============================================================
 АРТЕФАКТИ:
 Коли даєш рекомендації, підсумки або порівняння - ЗБЕРІГАЙ їх як артефакти!
 Формат: [ARTIFACT:recommendation]текст рекомендації[/ARTIFACT]
@@ -2000,6 +2131,7 @@ class AIAdvisorApp:
                 0, lambda a=restored_artifacts: self._update_artifacts_listbox(a)
             )
         self._generate_suggestions()
+        self._do_load_html()
 
     def _update_status(self, msg: str):
         self.status_label.config(text=msg)
@@ -2558,7 +2690,20 @@ Top ключові слова: {", ".join(brief.top_keywords[:8]) if brief.top_k
         )
 
         md = markdown.Markdown(
-            extensions=["tables", "fenced_code", "nl2br", "sane_lists"],
+            extensions=[
+                "tables",
+                "fenced_code",
+                "nl2br",
+                "sane_lists",
+                "def_list",
+                "abbr",
+                "footnotes",
+                "attr_list",
+                "md_in_html",
+                "pymdownx.mark",
+                "pymdownx.tilde",
+                "pymdownx.caret",
+            ],
             output_format="html",
         )
         html_body = md.convert(text_with_placeholders)
@@ -2690,6 +2835,60 @@ th { background: #f8f8f8; }
 .user-msg { background: #e3f0ff; padding: 10px 14px; border-radius: 15px 15px 0 15px; margin: 8px 0; max-width: 85%; margin-left: auto; clear: both; }
 .ai-msg { background: #f5f5f5; padding: 10px 14px; border-radius: 15px 15px 15px 0; margin: 8px 0; max-width: 85%; clear: both; }
 .system-msg { color: #888; font-style: italic; padding: 5px 0; font-size: 12px; clear: both; }
+mark, .highlight, .hl, span[style*="background"] {
+    background-color: #fff3cd !important;
+    padding: 1px 4px;
+    border-radius: 3px;
+}
+mark, .highlight, .hl, span[style*="background"] {
+    background-color: #fff3cd !important;
+    padding: 1px 4px;
+    border-radius: 3px;
+    display: inline;
+}
+del {
+    text-decoration: line-through;
+    color: #c0392b;
+    background-color: #fde8e8;
+    padding: 1px 4px;
+    border-radius: 3px;
+}
+sup {
+    font-size: 0.75em;
+    vertical-align: super;
+    line-height: 0;
+}
+sub {
+    font-size: 0.75em;
+    vertical-align: sub;
+    line-height: 0;
+}
+abbr {
+    text-decoration: underline dotted;
+    cursor: help;
+}
+dl {
+    margin: 10px 0;
+}
+dt {
+    font-weight: bold;
+    margin-top: 8px;
+}
+dd {
+    margin-left: 20px;
+    color: #555;
+}
+.footnote-ref {
+    font-size: 0.75em;
+    vertical-align: super;
+}
+.footnote {
+    font-size: 0.85em;
+    color: #666;
+    border-top: 1px solid #eee;
+    padding-top: 8px;
+    margin-top: 12px;
+}
 """
         return f"""<!DOCTYPE html>
 <html>

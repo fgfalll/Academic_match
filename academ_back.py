@@ -161,6 +161,7 @@ class MonCouncilProApp:
         self.current_banned_keywords = []
         self.global_banned_keywords = []
         self.ai_advisor_instance = None
+        self._current_file_path = None
         self.create_widgets()
         self.update_keyword_preview()
 
@@ -173,10 +174,17 @@ class MonCouncilProApp:
             label="Зберегти сесію", command=self.save_session, accelerator="Ctrl+S"
         )
         file_menu.add_command(
+            label="Зберегти сесію як...",
+            command=self.save_session_as,
+            accelerator="Ctrl+Shift+S",
+        )
+        file_menu.add_command(
             label="Завантажити сесію", command=self.load_session, accelerator="Ctrl+O"
         )
         file_menu.add_separator()
         file_menu.add_command(label="Вихід", command=self.root.quit)
+        self.root.bind("<Control-s>", lambda e: self.save_session())
+        self.root.bind("<Control-o>", lambda e: self.load_session())
         self.root.bind("<Control-s>", lambda e: self.save_session())
         self.root.bind("<Control-o>", lambda e: self.load_session())
 
@@ -582,6 +590,72 @@ class MonCouncilProApp:
     def save_session(self):
         import os, zipfile, io
 
+        if self._current_file_path and os.path.exists(self._current_file_path):
+            path = self._current_file_path
+        else:
+            path = filedialog.asksaveasfilename(
+                initialdir=os.path.dirname(self._get_default_save_path()),
+                defaultextension=".acmp",
+                filetypes=[("Academic Match Project", "*.acmp"), ("Всі файли", "*.*")],
+                initialfile=os.path.basename(self._get_default_save_path()),
+            )
+            if not path:
+                return
+
+        pin_for_encryption = None
+        if self.ai_advisor_instance and hasattr(
+            self.ai_advisor_instance, "get_state_for_session"
+        ):
+            pin_dialog = tk.Toplevel(self.root)
+            pin_dialog.title("PIN")
+            pin_dialog.resizable(0, 0)
+            pin_dialog.transient(self.root)
+            pin_dialog.grab_set()
+
+            pin_dialog.update_idletasks()
+            x = (pin_dialog.winfo_screenwidth() // 2) - (
+                pin_dialog.winfo_reqwidth() // 2
+            )
+            y = (pin_dialog.winfo_screenheight() // 2) - (
+                pin_dialog.winfo_reqheight() // 2
+            )
+            pin_dialog.geometry(f"+{x}+{y}")
+
+            frame = ttk.Frame(pin_dialog, padding="20")
+            frame.pack()
+
+            ttk.Label(
+                frame,
+                text="Введіть 4-значний PIN\nдля шифрування API ключів:",
+                font=("Arial", 11),
+            ).pack(pady=(0, 10))
+            pin_var = tk.StringVar()
+            pin_entry = ttk.Entry(
+                frame, textvariable=pin_var, show="*", width=10, font=("Arial", 14)
+            )
+            pin_entry.pack(pady=(0, 10))
+            pin_entry.focus()
+
+            def on_pin_set():
+                p = pin_var.get()
+                if len(p) != 4 or not p.isdigit():
+                    messagebox.showwarning("Помилка", "PIN має бути 4 цифри")
+                    return
+                pin_dialog.destroy()
+                self._do_save_session_as_zip(path, p)
+
+            ttk.Button(frame, text="Скасувати", command=pin_dialog.destroy).pack(
+                side="left", padx=(0, 5)
+            )
+            ttk.Button(frame, text="Зберегти", command=on_pin_set).pack(side="left")
+            pin_entry.bind("<Return>", lambda e: on_pin_set())
+            return
+
+        self._do_save_session_as_zip(path, None)
+
+    def save_session_as(self):
+        import os, zipfile, io
+
         path = filedialog.asksaveasfilename(
             initialdir=os.path.dirname(self._get_default_save_path()),
             defaultextension=".acmp",
@@ -652,6 +726,7 @@ class MonCouncilProApp:
             with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
                 zf.writestr("session.json", session_json)
 
+            self._current_file_path = path
             self.log(f"Сесію збережено: {path}")
             messagebox.showinfo("Збереження сесії", f"Сесію успішно збережено!")
         except Exception as e:
