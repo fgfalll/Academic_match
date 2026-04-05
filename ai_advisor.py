@@ -1600,6 +1600,7 @@ class AIAdvisorApp:
                         restored_history = self._restore_state["chat_history"]
                         if isinstance(restored_history, list):
                             self.chat_history = restored_history
+                            self._restore_chat_history()
                     if self._restore_state.get("artifacts"):
                         self.artifacts = self._restore_state["artifacts"]
                     self._restore_state = None
@@ -1785,7 +1786,7 @@ class AIAdvisorApp:
             provider = state.get("provider")
             model = state.get("model")
             api_key_encrypted = state.get("api_key")
-            chat_history_encrypted = state.get("chat_history")
+            chat_history = state.get("chat_history")
             artifacts = state.get("artifacts", [])
 
             api_key = api_key_encrypted
@@ -1799,16 +1800,9 @@ class AIAdvisorApp:
             self.pin_window.destroy()
             self._start_with_api_key(provider, api_key, None, model)
 
-            if chat_history_encrypted:
-                if chat_history_encrypted.startswith("enc:"):
-                    try:
-                        _, chat_history_json = decrypt_with_embedded_pin_hash(
-                            chat_history_encrypted[4:], pin
-                        )
-                        if chat_history_json:
-                            self.chat_history = json.loads(chat_history_json)
-                    except:
-                        pass
+            if chat_history:
+                self.chat_history = chat_history
+                self._restore_chat_history()
 
             if artifacts:
                 self.artifacts = artifacts
@@ -1983,11 +1977,28 @@ class AIAdvisorApp:
     def _restore_chat_history(self):
         self._messages_html = []
         self._thinking_index = -1
+        if not isinstance(self.artifacts, list):
+            self.artifacts = []
+        restored_artifacts = []
         for msg in self.chat_history:
             if msg["role"] == "user":
                 self._append_html_message(msg["content"], "user")
             elif msg["role"] == "assistant":
-                self._append_html_message(msg["content"], "ai")
+                response = msg["content"]
+                response, artifacts = DataRequestParser.convert_artifacts_to_html(
+                    response
+                )
+                if artifacts:
+                    restored_artifacts.extend(artifacts)
+                display_text = self._strip_markers_for_display(response)
+                html_content = self._markdown_to_html(display_text)
+                msg_html = f'<div class="ai-msg">{html_content}</div>'
+                self._messages_html.append(msg_html)
+        if restored_artifacts:
+            self.artifacts.extend(restored_artifacts)
+            self.window.after(
+                0, lambda a=restored_artifacts: self._update_artifacts_listbox(a)
+            )
         self._generate_suggestions()
 
     def _update_status(self, msg: str):
@@ -2535,11 +2546,28 @@ Top ключові слова: {", ".join(brief.top_keywords[:8]) if brief.top_k
         self._do_load_html()
 
     def _markdown_to_html(self, text: str) -> str:
+        artifact_pattern = r'<div class="artifact-block[^"]*">.*?</div></div>'
+        artifacts = []
+
+        def preserve_artifact(match):
+            artifacts.append(match.group(0))
+            return f"\x00ARTIFACT_PLACEHOLDER_{len(artifacts) - 1}\x00"
+
+        text_with_placeholders = re.sub(
+            artifact_pattern, preserve_artifact, text, flags=re.DOTALL
+        )
+
         md = markdown.Markdown(
             extensions=["tables", "fenced_code", "nl2br", "sane_lists"],
             output_format="html",
         )
-        html_body = md.convert(text)
+        html_body = md.convert(text_with_placeholders)
+
+        for i, artifact_html in enumerate(artifacts):
+            html_body = html_body.replace(
+                f"\x00ARTIFACT_PLACEHOLDER_{i}\x00", artifact_html
+            )
+
         return html_body
 
     def _update_html_display(self, force: bool = False):
