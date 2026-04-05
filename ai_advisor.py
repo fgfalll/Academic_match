@@ -28,40 +28,28 @@ def web_search(query: str, num_results: int = 5) -> Dict[str, Any]:
     result = {"query": query, "source": "duckduckgo", "results": [], "error": None}
 
     try:
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-        }
-        url = f"https://html.duckduckgo.com/html/?q={requests.utils.quote(query)}"
-        response = requests.get(url, headers=headers, timeout=10)
-        response.raise_for_status()
+        from ddgs import DDGS
 
-        from bs4 import BeautifulSoup
-
-        soup = BeautifulSoup(response.text, "html.parser")
-
-        results = []
-        for i, a_tag in enumerate(soup.find_all("a", class_="result__a")[:num_results]):
-            href = a_tag.get("href", "")
-            snippet_tag = a_tag.find_parent("div").find_next_sibling("div")
-            snippet = ""
-            if snippet_tag:
-                snippet = snippet_tag.get_text(strip=True)
-
-            results.append(
-                {
-                    "title": a_tag.get_text(strip=True),
-                    "url": href,
-                    "snippet": snippet[:200] + "..." if len(snippet) > 200 else snippet,
-                }
-            )
-
-        result["results"] = results
-
+        with DDGS() as ddgs:
+            ddg_results = list(ddgs.text(query, max_results=num_results))
+            for r in ddg_results:
+                result["results"].append(
+                    {
+                        "title": r.get("title", ""),
+                        "url": r.get("href", ""),
+                        "snippet": (
+                            r.get("body", "")[:200] + "..."
+                            if r.get("body") and len(r.get("body", "")) > 200
+                            else r.get("body", "") or ""
+                        ),
+                    }
+                )
+        if not result["results"]:
+            result["error"] = "Не вдалося знайтити результати"
     except Exception as e:
         result["error"] = str(e)
-        result["results"] = []
 
-    if TAVILY_API_KEY and result["error"]:
+    if TAVILY_API_KEY and (result["error"] or not result["results"]):
         tavily_result = _tavily_search(query, num_results)
         if tavily_result["results"]:
             return tavily_result
@@ -93,9 +81,11 @@ def _tavily_search(query: str, num_results: int = 5) -> Dict[str, Any]:
                 {
                     "title": item.get("title", ""),
                     "url": item.get("url", ""),
-                    "snippet": item.get("content", "")[:200] + "..."
-                    if len(item.get("content", "")) > 200
-                    else item.get("content", ""),
+                    "snippet": (
+                        item.get("content", "")[:200] + "..."
+                        if item.get("content") and len(item.get("content", "")) > 200
+                        else item.get("content", "") or ""
+                    ),
                 }
             )
 
@@ -109,7 +99,7 @@ def _tavily_search(query: str, num_results: int = 5) -> Dict[str, Any]:
     return result
 
 
-OPENALEX_MAILTO = "your-email@example.com"
+OPENALEX_MAILTO = os.environ.get("OPENALEX_MAILTO", "academic-match@example.com")
 OPENALEX_BASE = "https://api.openalex.org"
 OPENALEX_PER_PAGE = 5
 
@@ -119,6 +109,8 @@ def _openalex_get(endpoint: str, params: dict) -> dict:
     params["per_page"] = OPENALEX_PER_PAGE
     try:
         resp = requests.get(f"{OPENALEX_BASE}/{endpoint}", params=params, timeout=15)
+        if resp.status_code == 400:
+            return {"error": f"Bad request (400): {resp.text[:200]}"}
         resp.raise_for_status()
         return resp.json()
     except Exception as e:
@@ -147,8 +139,6 @@ def search_authors(query: str, field: str = None) -> dict:
         "search": query,
         "select": "id,display_name,orcid,cited_by_count,h-index,works_count,topics",
     }
-    if field:
-        params["filter"] = f"topic:{field}"
     return _openalex_get("authors", params)
 
 
@@ -677,8 +667,7 @@ class LazyAnalysisData:
                 if brief.top_scores:
                     lines.append("Top публікації:")
                     for score, title, matched in brief.top_scores[:3]:
-                        title_short = title[:50] + "..." if len(title) > 50 else title
-                        lines.append(f'  [{score}] "{title_short}" - {matched}')
+                        lines.append(f'  [{score}] "{title}" - {matched}')
 
                 if brief.top_keywords:
                     lines.append(f"Ключові слова: {', '.join(brief.top_keywords[:8])}")
@@ -718,8 +707,8 @@ class LazyAnalysisData:
                 top_scores.append(
                     (
                         p.get("score", 0),
-                        p.get("title", "")[:50],
-                        p.get("matched_details", "")[:50],
+                        p.get("title", ""),
+                        p.get("matched_details", ""),
                     )
                 )
 
@@ -889,8 +878,69 @@ class DataRequestParser:
                     )
                 return f"🔍 **OpenAlex:** {endpoint}"
             return ""
+            cand_id = parts[1]
+            name = id_to_name.get(cand_id, cand_id) if id_to_name else cand_id
 
-        text = re.sub(r"\[(?:GET|COMPARE|SEARCH):[^\]]+\]", replace_get, text)
+            if action == "GET":
+                if cand_id == "BANNED":
+                    return "🔍 <strong>Отримую список виключених слів</strong>"
+                elif len(parts) == 2:
+                    return f"🔍 <strong>Отримую дані:</strong> {name}"
+                elif len(parts) == 3:
+                    subtype = parts[2]
+                    if subtype == "BANNED":
+                        return f"🔍 <strong>Отримую виключені слова:</strong> {name}"
+                    return f"🔍 <strong>Отримую ({subtype}):</strong> {name}"
+                elif len(parts) == 4:
+                    year = parts[3]
+                    return f"🔍 <strong>Отримую публікації за {year}:</strong> {name}"
+                elif len(parts) == 5:
+                    year = parts[3]
+                    idx = parts[4]
+                    return f"🔍 <strong>Отримую деталі публікації #{idx} за {year}:</strong> {name}"
+            elif action == "COMPARE":
+                cand_ids = [
+                    id_to_name.get(cid, cid) if id_to_name else cid for cid in parts[1:]
+                ]
+                return f"📊 <strong>Порівнюю:</strong> {', '.join(cand_ids)}"
+            elif action == "SEARCH":
+                query = ":".join(parts[1:])
+                return f"🌐 <strong>Шукаю в інтернеті:</strong> {query}"
+            elif action == "OPENALEX":
+                endpoint = parts[1] if len(parts) > 1 else ""
+                rest = ":".join(parts[2:]) if len(parts) > 2 else ""
+                if endpoint == "works":
+                    return (
+                        f"📚 <strong>Шукаю роботи:</strong> {rest}"
+                        if rest
+                        else "📚 <strong>Шукаю роботи</strong>"
+                    )
+                elif endpoint == "concepts":
+                    return (
+                        f"🏷️ <strong>Шукаю концепти:</strong> {rest}"
+                        if rest
+                        else "🏷️ <strong>Шукаю концепти</strong>"
+                    )
+                elif endpoint == "authors":
+                    if rest and ":" in rest:
+                        name, field = rest.rsplit(":", 1)
+                        return (
+                            f"👤 <strong>Шукаю автора:</strong> {name} (тема: {field})"
+                        )
+                    return (
+                        f"👤 <strong>Шукаю автора:</strong> {rest}"
+                        if rest
+                        else "👤 <strong>Шукаю автора</strong>"
+                    )
+                return f"🔍 <strong>OpenAlex:</strong> {endpoint}"
+            return ""
+
+        text = re.sub(r"\[(?:GET|COMPARE|SEARCH|OPENALEX):[^\]]+\]", replace_get, text)
+
+        text = re.sub(
+            r"\[(?:ADD_BANNED|GET|COMPARE|SEARCH|OPENALEX):[^\]]*\]", "", text
+        )
+        text = re.sub(r"\[/?(?:ARTIFACT)[^\]]*\]", "", text)
 
         if id_to_name:
             for cand_id, name in id_to_name.items():
@@ -921,11 +971,9 @@ class DataRequestParser:
             parts = req_clean.split(":")
             if len(parts) >= 2:
                 action = parts[0]
-                if action in ("GET", "SEARCH"):
-                    # The entire rest of the string is the argument
+                if action in ("GET", "SEARCH", "OPENALEX"):
                     ids = [":".join(parts[1:]).strip()]
                 elif action == "COMPARE":
-                    # Each part is a candidate ID
                     ids = [x.strip() for x in parts[1:]]
                 elif action == "ADD_BANNED":
                     if len(parts) == 3:
@@ -1206,7 +1254,6 @@ OPENALEX API (використовуй для детальних даних пр
 [OPENALEX:works:search term] - search scientific papers on OpenAlex
 [OPENALEX:concepts:field name] - get OpenAlex concept ID for a field
 [OPENALEX:authors:author name] - find author ID and detailed citation metrics
-[OPENALEX:authors:author name:field] - find author filtered by concept/field
 
 Приклади:
 [SEARCH:CCUS carbon capture storage latest research 2024]
@@ -1252,6 +1299,8 @@ class AIAdvisorApp:
         self.ai_provider = None
         self.chat_history = []
         self.artifacts = []
+        self.ai_responding = False
+        self.stop_response = False
 
         self._select_project_window()
 
@@ -1579,6 +1628,7 @@ class AIAdvisorApp:
             "recommendation": "Рекомендація",
             "summary": "Підсумок",
             "comparison": "Порівняння",
+            "search_result": "Пошук",
         }
         for artifact in artifacts:
             label = type_labels.get(
@@ -1586,12 +1636,14 @@ class AIAdvisorApp:
             )
             content = artifact.get("content", "")
             content_preview = content[:50] + "..." if len(content) > 50 else content
+            if artifact.get("query"):
+                content_preview = f"'{artifact['query']}': {content_preview}"
             self.artifacts_listbox.insert(tk.END, f"[{label}] {content_preview}")
 
     def _build_main_window(self):
         self.window = tk.Toplevel(self.parent)
         self.window.title("AI Науковий Консультант")
-        self.window.geometry("1200x700")
+        self.window.geometry("1300x750")
 
         self.window.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -1611,6 +1663,11 @@ class AIAdvisorApp:
         menubar.add_cascade(label="Вид", menu=view_menu)
         view_menu.add_command(
             label="Показати вхідні дані", command=self._show_analysis_data
+        )
+        self.artifacts_visible = False
+        self.view_menu = view_menu
+        view_menu.add_command(
+            label="Показати артефакти", command=self._toggle_artifacts_panel
         )
 
         settings_menu = tk.Menu(menubar, tearoff=0)
@@ -1646,9 +1703,6 @@ class AIAdvisorApp:
         self.chat_display = tkinterweb.HtmlFrame(chat_frame)
         # Do NOT use on_done_loading – it fires unreliably when load_html is called
         # rapidly during streaming and causes jump-to-top artefacts.
-        self.chat_display.pack(fill="both", expand=True)
-        # Bind scroll events so we can detect when the user scrolls up manually
-        self.chat_display.after(200, self._bind_chat_scroll)
 
         self.chat_context_menu = tk.Menu(self.window, tearoff=0)
         self.chat_context_menu.add_command(
@@ -1669,9 +1723,14 @@ class AIAdvisorApp:
             label="Закрити", command=lambda: self.chat_context_menu.unpost()
         )
 
-        self.chat_display.bind("<Button-3>", self._show_chat_context_menu)
+        bottom_container = ttk.Frame(chat_frame)
+        bottom_container.pack(side="bottom", fill="x")
 
-        input_frame = ttk.Frame(chat_frame)
+        self.suggestions_frame = ttk.Frame(bottom_container)
+        self.suggestions_frame.pack(fill="x", pady=(0, 3))
+        self.suggestion_buttons = []
+
+        input_frame = ttk.Frame(bottom_container)
         input_frame.pack(fill="x", pady=(3, 0))
 
         self.chat_input = tk.Text(
@@ -1680,24 +1739,37 @@ class AIAdvisorApp:
         self.chat_input.pack(side="left", fill="both", expand=True)
         self.chat_input.bind("<Control-Return>", lambda e: self._send_message())
 
-        send_btn = ttk.Button(input_frame, text="Надіслати", command=self._send_message)
-        send_btn.pack(side="left", padx=(3, 0))
+        self.send_btn = ttk.Button(
+            input_frame, text="Надіслати", command=self._send_message
+        )
+        self.send_btn.pack(side="left", padx=(3, 0))
+
+        self.chat_display.pack(fill="both", expand=True)
+        # Bind scroll events so we can detect when the user scrolls up manually
+        self.chat_display.after(200, self._bind_chat_scroll)
+        self.chat_display.bind("<Button-3>", self._show_chat_context_menu)
 
         right_frame = ttk.Frame(middle_paned)
-        middle_paned.add(right_frame, weight=1)
+        middle_paned.add(right_frame, weight=2)
 
-        suggestions_frame = ttk.LabelFrame(right_frame, text="Пропозиції", padding="3")
-        suggestions_frame.pack(fill="both", expand=True, pady=(0, 3))
+        self.artifacts_frame = ttk.LabelFrame(
+            right_frame, text="Артефакти", padding="5"
+        )
+        self.artifacts_frame.pack(fill="both", expand=True)
+        self.artifacts_frame.pack_forget()
 
-        self.suggestions_listbox = tk.Listbox(suggestions_frame, font=("Arial", 9))
-        self.suggestions_listbox.pack(fill="both", expand=True)
-        self.suggestions_listbox.bind("<Double-Button-1>", self._on_suggestion_click)
+        scrollbar = ttk.Scrollbar(self.artifacts_frame)
+        scrollbar.pack(side="right", fill="y")
 
-        artifacts_frame = ttk.LabelFrame(right_frame, text="Артефакти", padding="3")
-        artifacts_frame.pack(fill="both", expand=True)
-
-        self.artifacts_listbox = tk.Listbox(artifacts_frame, font=("Arial", 9))
-        self.artifacts_listbox.pack(fill="both", expand=True)
+        self.artifacts_listbox = tk.Listbox(
+            self.artifacts_frame,
+            font=("Arial", 10),
+            yscrollcommand=scrollbar.set,
+            activestyle="none",
+        )
+        self.artifacts_listbox.pack(fill="both", expand=True, padx=(5, 0))
+        self.artifacts_listbox.bind("<Double-Button-1>", self._on_artifact_click)
+        scrollbar.config(command=self.artifacts_listbox.yview)
 
         self._add_welcome_message()
         self._generate_suggestions()
@@ -1780,6 +1852,10 @@ class AIAdvisorApp:
         self._append_message(content, msg_type)
 
     def _send_message(self):
+        if self.ai_responding:
+            self._stop_ai_response()
+            return
+
         msg = self.chat_input.get("1.0", tk.END).strip()
         if not msg:
             return
@@ -1789,7 +1865,20 @@ class AIAdvisorApp:
 
         self.chat_history.append({"role": "user", "content": msg})
 
+        self.ai_responding = True
+        self.stop_response = False
+        self._update_send_button()
         threading.Thread(target=self._get_ai_response, args=(msg,), daemon=True).start()
+
+    def _stop_ai_response(self):
+        self.stop_response = True
+        self._append_chat("system", "[Сеанс перервано користувачем]")
+
+    def _update_send_button(self):
+        if self.ai_responding:
+            self.send_btn.config(text="Стоп", style="Stop.TButton")
+        else:
+            self.send_btn.config(text="Надіслати", style="TButton")
 
     def _process_data_requests(self, requests: List[str]) -> Dict[str, Any]:
         results = {}
@@ -1861,8 +1950,23 @@ class AIAdvisorApp:
 
             elif action == "COMPARE":
                 comparison = self.analysis_data.compare_candidates(ids)
-                results[f"COMPARE:{','.join(ids)}"] = self._format_comparison(
-                    comparison
+                formatted = self._format_comparison(comparison)
+                results[f"COMPARE:{','.join(ids)}"] = formatted
+                self.artifacts.append(
+                    {
+                        "type": "comparison",
+                        "content": formatted,
+                        "candidates": ",".join(ids),
+                        "timestamp": datetime.now().isoformat(),
+                    }
+                )
+                self.window.after(
+                    0,
+                    lambda a={
+                        "type": "comparison",
+                        "content": formatted,
+                        "candidates": ",".join(ids),
+                    }: self._update_artifacts_listbox([a]),
                 )
 
             elif action == "ADD_BANNED":
@@ -1911,13 +2015,11 @@ class AIAdvisorApp:
                     )
                     self.window.after(
                         0,
-                        lambda a=[
-                            {
-                                "type": "search_result",
-                                "content": artifact_content,
-                                "query": query,
-                            }
-                        ]: self._update_artifacts_listbox(a),
+                        lambda a={
+                            "type": "search_result",
+                            "content": artifact_content,
+                            "query": query,
+                        }: self._update_artifacts_listbox([a]),
                     )
 
             elif action == "OPENALEX":
@@ -1997,8 +2099,7 @@ Top ключові слова: {", ".join(brief.top_keywords[:8]) if brief.top_k
                 f"  avg_score: {stats.avg_score:.1f}, relevant: {stats.relevant_count}"
             )
             for p in stats.papers[:3]:
-                title_short = p.title[:50] + "..." if len(p.title) > 50 else p.title
-                lines.append(f"  [{p.score}] {title_short}")
+                lines.append(f"  [{p.score}] {p.title}")
         return "\n".join(lines)
 
     def _format_year_stats(self, stats: YearStats) -> str:
@@ -2008,18 +2109,13 @@ Top ключові слова: {", ".join(brief.top_keywords[:8]) if brief.top_k
         lines.append(f"Relevant: {stats.relevant_count}")
         lines.append("\nПублікації:")
         for i, p in enumerate(stats.papers):
-            title_short = p.title[:60] + "..." if len(p.title) > 60 else p.title
-            lines.append(f"  {i}. [{p.score}] {title_short}")
+            lines.append(f"  {i}. [{p.score}] {p.title}")
             lines.append(f"     Збіги: {p.matched_details}")
         return "\n".join(lines)
 
     def _format_paper_detail(self, paper: PaperDetail) -> str:
         lines = []
-        lines.append(
-            f"=== {paper.title[:80]}... ==="
-            if len(paper.title) > 80
-            else f"=== {paper.title} ==="
-        )
+        lines.append(f"=== {paper.title} ===")
         lines.append(f"Рік: {paper.year}")
         lines.append(f"Score: {paper.score}")
         lines.append(f"Збіги: {paper.matched_details}")
@@ -2088,8 +2184,15 @@ Top ключові слова: {", ".join(brief.top_keywords[:8]) if brief.top_k
             full_response = []
 
             for chunk in self.ai_provider.chat_stream(messages):
+                if self.stop_response:
+                    break
                 full_response.append(chunk)
                 self.window.after(0, lambda c=chunk: self._append_streaming_chunk(c))
+
+            if self.stop_response:
+                self.ai_responding = False
+                self._update_send_button()
+                return
 
             response = "".join(full_response)
             self.chat_history.append({"role": "assistant", "content": response})
@@ -2156,10 +2259,17 @@ Top ключові слова: {", ".join(brief.top_keywords[:8]) if brief.top_k
 
                 full_response2 = []
                 for chunk in self.ai_provider.chat_stream(messages):
+                    if self.stop_response:
+                        break
                     full_response2.append(chunk)
                     self.window.after(
                         0, lambda c=chunk: self._append_streaming_chunk(c)
                     )
+
+                if self.stop_response:
+                    self.ai_responding = False
+                    self._update_send_button()
+                    return
 
                 response2 = "".join(full_response2)
                 self.chat_history.append({"role": "assistant", "content": response2})
@@ -2180,11 +2290,15 @@ Top ключові слова: {", ".join(brief.top_keywords[:8]) if brief.top_k
                 )
 
             self.window.after(0, self._generate_suggestions)
+            self.ai_responding = False
+            self._update_send_button()
 
         except Exception as e:
             self.window.after(0, lambda: self._hide_thinking())
             error_msg = f"Помилка: {str(e)}"
             self.window.after(0, lambda: self._append_chat("system", error_msg))
+            self.ai_responding = False
+            self._update_send_button()
 
     def _show_thinking(self, msg="Думаємо..."):
         thinking_html = f'<div class="system-msg" style="color: #666; font-style: italic;">{msg}</div>'
@@ -2212,9 +2326,11 @@ Top ключові слова: {", ".join(brief.top_keywords[:8]) if brief.top_k
         self._do_load_html()
 
     def _markdown_to_html(self, text: str) -> str:
-        html_body = markdown.markdown(
-            text, extensions=["tables", "fenced_code", "nl2br", "sane_lists"]
+        md = markdown.Markdown(
+            extensions=["tables", "fenced_code", "nl2br", "sane_lists"],
+            output_format="html",
         )
+        html_body = md.convert(text)
         return html_body
 
     def _update_html_display(self, force: bool = False):
@@ -2299,8 +2415,8 @@ th { background: #f8f8f8; }
             )
             content_preview = (
                 artifact.get("content", "")[:50] + "..."
-                if len(artifact.get("content", "")) > 50
-                else artifact.get("content", "")
+                if artifact.get("content") and len(artifact.get("content", "")) > 50
+                else artifact.get("content", "") or ""
             )
             if artifact.get("query"):
                 content_preview = f"'{artifact['query']}': {content_preview}"
@@ -2444,25 +2560,48 @@ th { background: #f8f8f8; }
 
     def _generate_suggestions(self):
         self.suggestions = [
-            "Хто найкращий кандидат і чому?",
-            "Які основні проблеми з публікаціями?",
-            "Порівняйте кандидатів за ключовими словами",
-            "Які рекомендації для покращення?",
-            "Проаналізуйте динаміку публікацій",
-            "Чи є ознаки наукометрії?",
-            "Оцініть відповідність ключовим словам",
+            "Хто найкращий кандидат?",
+            "Проблеми публікацій?",
+            "Порівняйте кандидатів",
+            "Рекомендації",
+            "Динаміка публікацій",
+            "Ознаки наукометрії?",
+            "Відповідність ключовим",
         ]
 
-        self.suggestions_listbox.delete(0, tk.END)
-        for s in self.suggestions:
-            self.suggestions_listbox.insert(tk.END, s)
+        for btn in self.suggestion_buttons:
+            btn.destroy()
+        self.suggestion_buttons.clear()
 
-    def _on_suggestion_click(self, event=None):
-        sel = self.suggestions_listbox.curselection()
-        if sel:
-            self.chat_input.delete("1.0", tk.END)
-            self.chat_input.insert("1.0", self.suggestions[sel[0]])
-            self._send_message()
+        for i, s in enumerate(self.suggestions):
+            short_texts = [
+                "Хто найкращий кандидат і чому?",
+                "Які основні проблеми з публікаціями?",
+                "Порівняйте кандидатів за ключовими словами",
+                "Які рекомендації для покращення?",
+                "Проаналізуйте динаміку публікацій",
+                "Чи є ознаки наукометрії?",
+                "Оцініть відповідність ключовим словам",
+            ]
+            btn = tk.Button(
+                self.suggestions_frame,
+                text=s,
+                wraplen=80,
+                font=("Arial", 8),
+                bg="#e8e8e8",
+                relief="groove",
+                cursor="hand2",
+                command=lambda idx=i, texts=short_texts: self._on_suggestion_click(
+                    idx, texts[idx]
+                ),
+            )
+            btn.pack(side="left", padx=2, pady=2, ipadx=5, ipady=2)
+            self.suggestion_buttons.append(btn)
+
+    def _on_suggestion_click(self, idx, full_text):
+        self.chat_input.delete("1.0", tk.END)
+        self.chat_input.insert("1.0", full_text)
+        self._send_message()
 
     def _show_analysis_data(self):
         dialog = tk.Toplevel(self.window)
@@ -2484,6 +2623,51 @@ th { background: #f8f8f8; }
         )
         self.context_text.insert("1.0", initial_context)
         self.context_text.config(state="disabled")
+
+    def _toggle_artifacts_panel(self):
+        if self.artifacts_visible:
+            self.artifacts_frame.pack_forget()
+            self.artifacts_visible = False
+            self.view_menu.entryconfigure(0, label="Показати артефакти")
+        else:
+            self.artifacts_frame.pack(fill="both", expand=True)
+            self.artifacts_frame.config(width=350)
+            self.artifacts_visible = True
+            self.view_menu.entryconfigure(0, label="Сховати артефакти")
+
+    def _on_artifact_click(self, event=None):
+        sel = self.artifacts_listbox.curselection()
+        if not sel:
+            return
+        idx = sel[0]
+        if idx >= len(self.artifacts):
+            return
+        artifact = self.artifacts[idx]
+        dialog = tk.Toplevel(self.window)
+        type_labels = {
+            "recommendation": "Рекомендація",
+            "summary": "Підсумок",
+            "comparison": "Порівняння",
+            "search_result": "Результат пошуку",
+        }
+        label = type_labels.get(
+            artifact.get("type", "unknown"), artifact.get("type", "unknown")
+        )
+        dialog.title(f"Артефакт: {label}")
+        dialog.geometry("700x500")
+        text = scrolledtext.ScrolledText(dialog, wrap="word", font=("Arial", 10))
+        text.pack(fill="both", expand=True, padx=5, pady=5)
+        content = artifact.get("content", "")
+        content = re.sub(r"\*(.+?)\*", r"\1", content)
+        content = re.sub(r"\*\*(.+?)\*\*", r"\1", content)
+        if artifact.get("candidates"):
+            content = f"Кандидати: {artifact['candidates']}\n\n{content}"
+        if artifact.get("query"):
+            content = f"Запит: {artifact['query']}\n\n{content}"
+        if artifact.get("source"):
+            content = f"{content}\n\nДжерело: {artifact['source']}"
+        text.insert("1.0", content if content else "(порожній артефакт)")
+        text.config(state="disabled")
 
     def _export_artifacts(self):
         if not self.artifacts:

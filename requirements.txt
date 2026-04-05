@@ -7,3 +7,4 @@ litellm
 markdown
 tkinterweb
 beautifulsoup4
+ddgs
