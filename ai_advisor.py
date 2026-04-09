@@ -57,6 +57,40 @@ def web_search(query: str, num_results: int = 5) -> Dict[str, Any]:
     return result
 
 
+def fetch_url_content(url: str, max_chars: int = 5000) -> dict:
+    result = {"url": url, "content": "", "error": None}
+
+    try:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        }
+        response = requests.get(url, headers=headers, timeout=15)
+        response.raise_for_status()
+
+        from bs4 import BeautifulSoup
+
+        soup = BeautifulSoup(response.text, "html.parser")
+
+        for script in soup(["script", "style", "nav", "footer", "header", "aside"]):
+            script.decompose()
+
+        text = soup.get_text(separator="\n", strip=True)
+        if not text:
+            text = ""
+        else:
+            lines = [line for line in text.split("\n") if line.strip()]
+            text = "\n".join(lines)
+
+        if text and len(text) > max_chars:
+            text = text[:max_chars] + f"\n... [Truncated {len(text) - max_chars} chars]"
+
+        result["content"] = text
+    except Exception as e:
+        result["error"] = str(e)
+
+    return result
+
+
 def _tavily_search(query: str, num_results: int = 5) -> Dict[str, Any]:
     result = {"query": query, "source": "tavily", "results": [], "error": None}
 
@@ -140,6 +174,249 @@ def search_authors(query: str, field: str = None) -> dict:
         "select": "id,display_name,orcid,cited_by_count,h-index,works_count,topics",
     }
     return _openalex_get("authors", params)
+
+
+SCHOLAR_DELAY_BASIC = 3
+SCHOLAR_DELAY_DEEP = 15
+_last_scholarly_call = 0
+
+_scholar_cache: Dict[str, Tuple[Any, float]] = {}
+SCHOLAR_CACHE_TTL = 1800
+
+TOOL_DISPLAY_NAMES = {
+    "get_candidate_data": "Завантажую дані кандидата",
+    "compare_candidates": "Порівнюю кандидатів",
+    "web_search": "Шукаю в інтернеті",
+    "fetch_page": "Завантажую сторінку",
+    "scholar_search": "Шукаю в Google Scholar",
+    "openalex_search": "Шукаю в OpenAlex",
+    "manage_banned_keywords": "Оновлюю фільтри",
+}
+
+
+def _scholar_rate_limit(delay_type: str = "basic"):
+    global _last_scholarly_call
+    import time
+    import random
+
+    min_delay = SCHOLAR_DELAY_DEEP if delay_type == "deep" else SCHOLAR_DELAY_BASIC
+    elapsed = time.time() - _last_scholarly_call
+    if elapsed < min_delay:
+        time.sleep(min_delay - elapsed + random.uniform(1, 3))
+    _last_scholarly_call = time.time()
+
+
+def search_google_scholar(
+    query: str, max_results: int = 10, fetch_details: bool = False
+) -> dict:
+    import time
+
+    cache_key = f"search:{query}:{max_results}:{fetch_details}"
+    now = time.time()
+
+    if cache_key in _scholar_cache:
+        cached_result, cached_time = _scholar_cache[cache_key]
+        if now - cached_time < SCHOLAR_CACHE_TTL:
+            cached_result["_cached"] = True
+            return cached_result
+
+    result = {"query": query, "results": [], "error": None}
+
+    try:
+        from scholarly import scholarly
+
+        _scholar_rate_limit("basic" if not fetch_details else "deep")
+
+        search_results = scholarly.search_pubs(query)
+        count = 0
+
+        for pub in search_results:
+            if count >= max_results:
+                break
+
+            bib = pub.get("bib", {})
+            title = bib.get("title", "N/A")
+            year = bib.get("pub_year", "N/A")
+            abstract = bib.get("abstract", "")
+            citation_count = pub.get("num_citations", 0)
+            authors = bib.get("author", [])
+            if isinstance(authors, str):
+                authors = [a.strip() for a in authors.split(",")]
+
+            paper_info = {
+                "title": title,
+                "year": year,
+                "authors": authors,
+                "citation_count": citation_count,
+                "abstract": abstract[:500] + "..."
+                if abstract and len(abstract) > 500
+                else abstract,
+            }
+
+            if fetch_details and year and str(year).isdigit():
+                _scholar_rate_limit("deep")
+                try:
+                    filled = scholarly.fill(pub)
+                    paper_info["abstract"] = filled.get("bib", {}).get(
+                        "abstract", paper_info["abstract"]
+                    )
+                    paper_info["journal"] = filled.get("bib", {}).get("venue", "")
+                    paper_info["url"] = filled.get("pub_url", "")
+                except Exception:
+                    pass
+
+            result["results"].append(paper_info)
+            count += 1
+
+        _scholar_cache[cache_key] = (result.copy(), now)
+
+    except Exception as e:
+        result["error"] = str(e)
+
+    return result
+
+
+def search_google_scholar_author(
+    author_name: str, max_results: int = 20, scholar_id: str = None
+) -> dict:
+    import time
+
+    cache_key = f"author:{scholar_id or author_name}"
+    now = time.time()
+
+    if cache_key in _scholar_cache:
+        cached_result, cached_time = _scholar_cache[cache_key]
+        if now - cached_time < SCHOLAR_CACHE_TTL:
+            cached_result["_cached"] = True
+            return cached_result
+
+    result = {"author": author_name, "publications": [], "error": None}
+
+    try:
+        from scholarly import scholarly
+        import random
+
+        _scholar_rate_limit("deep")
+
+        if scholar_id:
+            try:
+                author = scholarly.search_author_id(scholar_id)
+                author = scholarly.fill(author)
+            except Exception:
+                result["error"] = f"Author not found with ID: {scholar_id}"
+                return result
+        else:
+            search_query = scholarly.search_author(author_name)
+            try:
+                author = next(search_query)
+            except StopIteration:
+                result["error"] = "Author not found"
+                return result
+            author = scholarly.fill(author)
+
+        author_name_fetched = author.get("name", author_name)
+        result["author"] = author_name_fetched
+        result["scholar_id"] = scholar_id or author.get("scholar_id", "")
+        result["affiliation"] = author.get("affiliation", "")
+        result["hindex"] = author.get("hindex", 0)
+        result["citedby"] = author.get("citedby", 0)
+
+        pubs = author.get("publications", [])
+        count = 0
+
+        for pub in pubs:
+            if count >= max_results:
+                break
+            if count > 0:
+                time.sleep(random.uniform(SCHOLAR_DELAY_BASIC, SCHOLAR_DELAY_BASIC + 2))
+
+            bib = pub.get("bib", {})
+            paper_info = {
+                "title": bib.get("title", "N/A"),
+                "year": bib.get("pub_year", "N/A"),
+                "citation_count": pub.get("num_citations", 0),
+            }
+            result["publications"].append(paper_info)
+            count += 1
+
+        _scholar_cache[cache_key] = (result.copy(), now)
+
+    except Exception as e:
+        result["error"] = str(e)
+
+    return result
+
+
+def format_scholar_result(data: dict, detailed: bool = False) -> str:
+    if data.get("error"):
+        return f"Google Scholar error: {data['error']}"
+
+    results = data.get("results", [])
+    if not results:
+        return "No results found."
+
+    cached_msg = " [cached]" if data.get("_cached") else ""
+    lines = [f"=== Google Scholar{cached_msg} ==="]
+    for i, r in enumerate(results, 1):
+        title = r.get("title", "N/A")
+        year = r.get("year", "N/A")
+        cited = r.get("citation_count", 0)
+        authors = r.get("authors", [])
+        author_str = (
+            ", ".join(authors[:3]) + ("..." if len(authors) > 3 else "")
+            if authors
+            else "Unknown"
+        )
+
+        lines.append(f"{i}. {title} ({year})")
+        lines.append(f"   Citations: {cited} | Authors: {author_str}")
+
+        if detailed and r.get("abstract"):
+            abstract = r.get("abstract", "")
+            lines.append(
+                f"   Abstract: {abstract[:200]}..."
+                if len(abstract) > 200
+                else f"   Abstract: {abstract}"
+            )
+
+        if r.get("journal"):
+            lines.append(f"   Journal: {r.get('journal')}")
+
+        if r.get("url"):
+            lines.append(f"   URL: {r.get('url')}")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+def format_scholar_author_result(data: dict) -> str:
+    if data.get("error"):
+        return f"Google Scholar Author error: {data['error']}"
+
+    cached_msg = " [cached]" if data.get("_cached") else ""
+    lines = [
+        f"=== Google Scholar Author: {data.get('author', 'Unknown')}{cached_msg} ==="
+    ]
+
+    if data.get("affiliation"):
+        lines.append(f"Affiliation: {data['affiliation']}")
+    if data.get("citedby"):
+        lines.append(f"Total citations: {data['citedby']}")
+    if data.get("hindex"):
+        lines.append(f"h-index: {data['hindex']}")
+
+    lines.append("")
+    pubs = data.get("publications", [])
+    if not pubs:
+        lines.append("No publications found.")
+    else:
+        lines.append(f"Publications ({len(pubs)}):")
+        for i, p in enumerate(pubs, 1):
+            lines.append(
+                f"  {i}. {p.get('title', 'N/A')} ({p.get('year', 'N/A')}) - Cited: {p.get('citation_count', 0)}"
+            )
+
+    return "\n".join(lines)
 
 
 def _truncate_abstract(abstract_idx: dict, max_words: int = 50) -> str:
@@ -246,6 +523,16 @@ def format_search_results(search_result: Dict[str, Any]) -> str:
         lines.append(f"   🔗 {r['url']}")
         lines.append("")
 
+    return "\n".join(lines)
+
+
+def format_fetch_result(fetch_result: Dict[str, Any]) -> str:
+    if fetch_result.get("error"):
+        return f"Не вдалося отримати вміст: {fetch_result['error']}"
+
+    lines = [f"**Вміст сторінки:** [{fetch_result['url']}]"]
+    lines.append("")
+    lines.append(fetch_result.get("content", ""))
     return "\n".join(lines)
 
 
@@ -712,10 +999,6 @@ class LazyAnalysisData:
             return True
 
     def build_initial_context(self, selected_cand_ids: List[str]) -> str:
-        selected_briefs = self.get_brief(selected_cand_ids)
-        other_ids = [cid for cid in self.get_all_ids() if cid not in selected_cand_ids]
-        other_briefs = self.get_brief(other_ids)
-
         lines = []
         lines.append("=== КОНТЕКСТ ДЛЯ АНАЛІЗУ ===")
         lines.append(f"Період аналізу: останні {self.years_back} років")
@@ -724,30 +1007,36 @@ class LazyAnalysisData:
         )
         lines.append("")
 
-        if selected_briefs:
-            lines.append("=== ОБРАНІ КАНДИДАТИ ===")
-            for cid, brief in sorted(selected_briefs.items(), key=lambda x: x[1].name):
-                lines.append(f"\n--- {brief.name} ({cid}) ---")
-                lines.append(f"Verdict: {brief.verdict}")
-                lines.append(f"Конфлікт: {brief.conflict}")
-                lines.append(f"Публікацій всього: {brief.papers_total}")
-                lines.append(f"Останні роки: {brief.papers_recent}")
-                lines.append(f"Придатних публікацій: {brief.papers_applicable}")
+        lines.append("=== ОБРАНІ КАНДИДАТИ (ID) ===")
+        for cid in selected_cand_ids:
+            name = self.get_name(cid)
+            lines.append(f"- {name} (ID: {cid})")
 
-                if brief.top_scores:
-                    lines.append("Top публікації:")
-                    for score, title, matched in brief.top_scores[:3]:
-                        lines.append(f'  [{score}] "{title}" - {matched}')
+        lines.append("\n=== ІНШІ КАНДИДАТИ (ID) ===")
+        other_ids = [cid for cid in self.get_all_ids() if cid not in selected_cand_ids]
+        for cid in other_ids:
+            name = self.get_name(cid)
+            lines.append(f"- {name} (ID: {cid})")
 
-                if brief.top_keywords:
-                    lines.append(f"Ключові слова: {', '.join(brief.top_keywords[:8])}")
+        lines.append("\n=== ДОВІДНИК ID КАНДИДАТІВ ===")
+        lines.append("(Використовуй ці ID в запитах до агента)")
+        for cid, cand in self.candidates.items():
+            cand_name = cand.get("name", "Невідомо")
+            cand_ids = cand.get("ids", "")
+            scholar_id = ""
+            orcid_id = ""
+            scholar_match = re.search(r"GS:([\w-]{12,})", cand_ids)
+            orcid_match = re.search(r"ORCID:([\d-]{19})", cand_ids)
+            if scholar_match:
+                scholar_id = f"GS:{scholar_match.group(1)}"
+            if orcid_match:
+                orcid_id = f"ORCID:{orcid_match.group(1)}"
+            id_str = " | ".join(filter(None, [scholar_id, orcid_id]))
+            lines.append(f"{cid}: {cand_name} [{id_str}]")
 
-        if other_briefs:
-            lines.append("\n=== ІНШІ КАНДИДАТИ ===")
-            for cid, brief in sorted(other_briefs.items(), key=lambda x: x[1].name):
-                lines.append(
-                    f"{brief.name} - {brief.verdict} - {pluralize_ukr(brief.papers_recent, 'публікація', 'публікації', 'публікацій')}"
-                )
+        lines.append(
+            "\nУВАГА: Щоб отримати публікації, конфлікти інтересів та статистику будь-якого кандидата, ВИКОРИСТАЙ ІНСТРУМЕНТ `get_candidate_data` передавши його ID."
+        )
 
         return "\n".join(lines)
 
@@ -850,7 +1139,9 @@ class LazyAnalysisData:
 
 
 class DataRequestParser:
-    REQUEST_PATTERN = r"\[(?:GET|COMPARE|ADD_BANNED|SEARCH|OPENALEX):[^\]]+\]"
+    REQUEST_PATTERN = (
+        r"\[(?:GET|COMPARE|ADD_BANNED|SEARCH|OPENALEX|SCHOLAR|FETCH):[^\]]+\]"
+    )
     ARTIFACT_PATTERN = r"\[ARTIFACT:(?:recommendation|summary|comparison|search_result)\].*?(?:\[/ARTIFACT\]|$)"
 
     @classmethod
@@ -997,6 +1288,28 @@ class DataRequestParser:
                         else "👤 **Шукаю автора**"
                     )
                 return f"🔍 **OpenAlex:** {endpoint}"
+            elif action == "SCHOLAR":
+                if len(parts) >= 2:
+                    subaction = parts[1]
+                    if subaction == "author":
+                        author_query = ":".join(parts[2:]) if len(parts) > 2 else ""
+                        if author_query.endswith(":detailed"):
+                            author_query = author_query[:-10].strip()
+                            return f"🔬 **Шукаю автора в Google Scholar (детально):** {author_query}"
+                        return f"🔬 **Шукаю автора в Google Scholar:** {author_query}"
+                    elif subaction == "profile":
+                        profile_id = ":".join(parts[2:]) if len(parts) > 2 else ""
+                        if profile_id.endswith(":detailed"):
+                            profile_id = profile_id[:-10].strip()
+                            return f"🔬 **Шукаю профіль Google Scholar {profile_id} (детально):**"
+                        return f"🔬 **Шукаю профіль Google Scholar {profile_id}:**"
+                    else:
+                        query = ":".join(parts[1:])
+                        return f"📄 **Шукаю в Google Scholar:** {query}"
+            elif action == "FETCH":
+                if len(parts) >= 2:
+                    url = parts[1]
+                    return f"📥 **Отримую вміст сторінки:** {url}"
             return ""
             cand_id = parts[1]
             name = id_to_name.get(cand_id, cand_id) if id_to_name else cand_id
@@ -1053,12 +1366,40 @@ class DataRequestParser:
                         else "👤 <strong>Шукаю автора</strong>"
                     )
                 return f"🔍 <strong>OpenAlex:</strong> {endpoint}"
+            elif action == "SCHOLAR":
+                if len(parts) >= 2:
+                    subaction = parts[1]
+                    if subaction == "author":
+                        author_query = ":".join(parts[2:]) if len(parts) > 2 else ""
+                        if author_query.endswith(":detailed"):
+                            author_query = author_query[:-10].strip()
+                            return f"🔬 <strong>Шукаю автора в Google Scholar (детально):</strong> {author_query}"
+                        return f"🔬 <strong>Шукаю автора в Google Scholar:</strong> {author_query}"
+                    elif subaction == "profile":
+                        profile_id = ":".join(parts[2:]) if len(parts) > 2 else ""
+                        if profile_id.endswith(":detailed"):
+                            profile_id = profile_id[:-10].strip()
+                            return f"🔬 <strong>Шукаю профіль Google Scholar {profile_id} (детально):</strong>"
+                        return f"🔬 <strong>Шукаю профіль Google Scholar {profile_id}:</strong>"
+                    else:
+                        query = ":".join(parts[1:])
+                        return f"📄 <strong>Шукаю в Google Scholar:</strong> {query}"
+            elif action == "FETCH":
+                if len(parts) >= 2:
+                    url = parts[1]
+                    return f"📥 <strong>Отримую вміст сторінки:</strong> {url}"
             return ""
 
-        text = re.sub(r"\[(?:GET|COMPARE|SEARCH|OPENALEX):[^\]]+\]", replace_get, text)
+        text = re.sub(
+            r"\[(?:GET|COMPARE|SEARCH|OPENALEX|SCHOLAR|FETCH):[^\]]+\]",
+            replace_get,
+            text,
+        )
 
         text = re.sub(
-            r"\[(?:ADD_BANNED|GET|COMPARE|SEARCH|OPENALEX):[^\]]*\]", "", text
+            r"\[(?:ADD_BANNED|GET|COMPARE|SEARCH|OPENALEX|SCHOLAR|FETCH):[^\]]*\]",
+            "",
+            text,
         )
         text = re.sub(r"\[/?(?:ARTIFACT)[^\]]*\]", "", text)
 
@@ -1091,7 +1432,7 @@ class DataRequestParser:
             parts = req_clean.split(":")
             if len(parts) >= 2:
                 action = parts[0]
-                if action in ("GET", "SEARCH", "OPENALEX"):
+                if action in ("GET", "SEARCH", "OPENALEX", "SCHOLAR", "FETCH"):
                     ids = [":".join(parts[1:]).strip()]
                 elif action == "COMPARE":
                     ids = [x.strip() for x in parts[1:]]
@@ -1136,15 +1477,9 @@ class AIProvider:
     }
 
     PROVIDER_DEFAULT_MODELS = {
-        "openai": "gpt-4o",
-        "anthropic": "claude-3-5-sonnet-20241022",
-        "google": "gemini-1.5-pro",
-        "deepseek": "deepseek-chat",
-        "zhipu": "glm-4",
+        "minimax": "MiniMax-M2.7",
         "moonshot": "moonshot-v1-8k",
-        "minimax": "MiniMax-M2.1",
-        "groq": "llama-3.3-70b-versatile",
-        "openrouter": "openrouter/auto",
+        "zhipu": "glm-4-flash",
         "xai": "grok-2",
     }
 
@@ -1182,28 +1517,44 @@ class AIProvider:
                     return [m["id"] for m in data.get("data", [])]
 
             elif self.provider == "minimax":
-                resp = requests.get(f"{api_base}/models", headers=headers, timeout=15)
-                if resp.status_code == 200:
-                    data = resp.json()
-                    return [m["id"] for m in data.get("data", [])]
+                return [
+                    "MiniMax-M2.7",
+                    "MiniMax-M2.7-highspeed",
+                    "MiniMax-M2.5",
+                    "MiniMax-M2.5-highspeed",
+                    "MiniMax-M2.1",
+                    "MiniMax-M2.1-highspeed",
+                    "MiniMax-M2",
+                ]
 
             elif self.provider == "moonshot":
-                resp = requests.get(f"{api_base}/models", headers=headers, timeout=15)
-                if resp.status_code == 200:
-                    data = resp.json()
-                    return [m["id"] for m in data.get("data", [])]
+                return [
+                    "moonshot-v1-8k",
+                    "moonshot-v1-32k",
+                    "moonshot-v1-128k",
+                    "kimi-k2-instruct",
+                    "kimi-k2-preview",
+                    "kimi-k2.5",
+                ]
 
             elif self.provider == "zhipu":
-                resp = requests.get(f"{api_base}/models", headers=headers, timeout=15)
-                if resp.status_code == 200:
-                    data = resp.json()
-                    return [m["id"] for m in data.get("data", [])]
+                return [
+                    "glm-4",
+                    "glm-4-flash",
+                    "glm-4-plus",
+                    "glm-4v",
+                    "glm-3",
+                    "glm-3-flash",
+                ]
 
             elif self.provider == "xai":
-                resp = requests.get(f"{api_base}/models", headers=headers, timeout=15)
-                if resp.status_code == 200:
-                    data = resp.json()
-                    return [m["id"] for m in data.get("data", [])]
+                return [
+                    "xai-beta",
+                    "grok-2",
+                    "grok-2-vision",
+                    "grok-3",
+                    "grok-3-beta",
+                ]
 
             elif self.provider == "openai":
                 resp = requests.get(f"{api_base}/models", headers=headers, timeout=15)
@@ -1258,17 +1609,31 @@ class AIProvider:
         if model is None:
             model = self.PROVIDER_DEFAULT_MODELS.get(self.provider, "default")
 
-        full_model = model if "/" in model else f"{self.provider}/{model}"
+        if self.provider == "google":
+            model = (
+                model.replace("models/", "")
+                .replace("vertex_ai/", "")
+                .replace("gemini/", "")
+            )
+            full_model = f"gemini/{model}"
+        else:
+            full_model = model if "/" in model else f"{self.provider}/{model}"
 
         try:
             kwargs = {
                 "model": full_model,
                 "messages": messages,
                 "temperature": 0.7,
+                "timeout": 120,
             }
 
             if self.provider == "google":
                 kwargs["api_key"] = self.api_key
+                kwargs["timeout"] = 180
+            elif self.provider == "deepseek":
+                kwargs["api_key"] = self.api_key
+                kwargs["api_base"] = self.get_api_base()
+                kwargs["max_tokens"] = 8192
             else:
                 kwargs["api_key"] = self.api_key
                 kwargs["api_base"] = self.get_api_base()
@@ -1277,26 +1642,52 @@ class AIProvider:
             return response["choices"][0]["message"]["content"]
         except Exception as e:
             error_str = str(e)
-            if "Authentication" in error_str or "auth" in error_str.lower():
+            error_repr = repr(e)
+            error_args = str(e.args) if e.args else "No args"
+            response_attr = getattr(e, "response", None)
+            status_code = getattr(e, "status_code", None)
+            cause_attr = getattr(e, "__cause__", None)
+            cause_str = f" | __cause__: {str(cause_attr)[:300]}" if cause_attr else ""
+            status_str = f" | status_code: {status_code}" if status_code else ""
+            response_str = f" | Response: {response_attr}" if response_attr else ""
+            if "Timeout" in error_str or "timeout" in error_str.lower():
                 raise ValueError(
-                    f"Помилка автентифікації: Перевірте API ключ для {self.provider}\n\nДеталі: {error_str[:300]}"
+                    f"Таймаут: {self.provider} не відповідає. Спробуйте пізніше.\n\nДеталі: {error_str[:1000]}\n\nrepr={error_repr[:500]}\n\nargs={error_args[:500]}{cause_str}{status_str}{response_str}"
+                )
+            elif "Authentication" in error_str or "auth" in error_str.lower():
+                raise ValueError(
+                    f"Помилка автентифікації: Перевірте API ключ для {self.provider}\n\nДеталі: {error_str[:1000]}\n\nrepr={error_repr[:500]}\n\nargs={error_args[:500]}{cause_str}{status_str}{response_str}"
                 )
             elif "rate limit" in error_str.lower():
                 raise ValueError(
-                    f"Ліміт запитів: Спробуйте пізніше\n\nДеталі: {error_str[:300]}"
+                    f"Ліміт запитів: Спробуйте пізніше\n\nДеталі: {error_str[:1000]}\n\nrepr={error_repr[:500]}\n\nargs={error_args[:500]}{cause_str}{status_str}{response_str}"
                 )
             elif "quota" in error_str.lower() or "limit" in error_str.lower():
                 raise ValueError(
-                    f"Квота вичерпана для {self.provider}\n\nДеталі: {error_str[:300]}"
+                    f"Квота вичерпана для {self.provider}\n\nДеталі: {error_str[:1000]}\n\nrepr={error_repr[:500]}\n\nargs={error_args[:500]}{cause_str}{status_str}{response_str}"
+                )
+            elif "Connection" in error_str:
+                raise ValueError(
+                    f"Помилка з'єднання: Перевірте інтернет.\n\nДеталі: {error_str[:1000]}\n\nrepr={error_repr[:500]}\n\nargs={error_args[:500]}{cause_str}{status_str}{response_str}"
                 )
             else:
-                raise ValueError(f"Помилка {self.provider}: {error_str[:300]}")
+                raise ValueError(
+                    f"Помилка {self.provider}: {error_str[:1000]}\n\nrepr={error_repr[:500]}\n\nargs={error_args[:500]}{cause_str}{status_str}{response_str}"
+                )
 
     def chat_stream(self, messages: List[Dict], model: str = None):
         if model is None:
             model = self.PROVIDER_DEFAULT_MODELS.get(self.provider, "default")
 
-        full_model = model if "/" in model else f"{self.provider}/{model}"
+        if self.provider == "google":
+            model = (
+                model.replace("models/", "")
+                .replace("vertex_ai/", "")
+                .replace("gemini/", "")
+            )
+            full_model = f"gemini/{model}"
+        else:
+            full_model = model if "/" in model else f"{self.provider}/{model}"
 
         try:
             kwargs = {
@@ -1304,10 +1695,16 @@ class AIProvider:
                 "messages": messages,
                 "temperature": 0.7,
                 "stream": True,
+                "timeout": 120,
             }
 
             if self.provider == "google":
                 kwargs["api_key"] = self.api_key
+                kwargs["timeout"] = 180
+            elif self.provider == "deepseek":
+                kwargs["api_key"] = self.api_key
+                kwargs["api_base"] = self.get_api_base()
+                kwargs["max_tokens"] = 8192
             else:
                 kwargs["api_key"] = self.api_key
                 kwargs["api_base"] = self.get_api_base()
@@ -1320,20 +1717,38 @@ class AIProvider:
                     yield content
         except Exception as e:
             error_str = str(e)
-            if "Authentication" in error_str or "auth" in error_str.lower():
+            error_repr = repr(e)
+            error_args = str(e.args) if e.args else "No args"
+            response_attr = getattr(e, "response", None)
+            status_code = getattr(e, "status_code", None)
+            cause_attr = getattr(e, "__cause__", None)
+            cause_str = f" | __cause__: {str(cause_attr)[:300]}" if cause_attr else ""
+            status_str = f" | status_code: {status_code}" if status_code else ""
+            response_str = f" | Response: {response_attr}" if response_attr else ""
+            if "Timeout" in error_str or "timeout" in error_str.lower():
                 raise ValueError(
-                    f"Помилка автентифікації: Перевірте API ключ для {self.provider}\n\nДеталі: {error_str[:300]}"
+                    f"Таймаут: {self.provider} не відповідає. Спробуйте пізніше.\n\nДеталі: {error_str[:1000]}\n\nrepr={error_repr[:500]}\n\nargs={error_args[:500]}{cause_str}{status_str}{response_str}"
+                )
+            elif "Authentication" in error_str or "auth" in error_str.lower():
+                raise ValueError(
+                    f"Помилка автентифікації: Перевірте API ключ для {self.provider}\n\nДеталі: {error_str[:1000]}\n\nrepr={error_repr[:500]}\n\nargs={error_args[:500]}{cause_str}{status_str}{response_str}"
                 )
             elif "rate limit" in error_str.lower():
                 raise ValueError(
-                    f"Ліміт запитів: Спробуйте пізніше\n\nДеталі: {error_str[:300]}"
+                    f"Ліміт запитів: Спробуйте пізніше\n\nДеталі: {error_str[:1000]}\n\nrepr={error_repr[:500]}\n\nargs={error_args[:500]}{cause_str}{status_str}{response_str}"
                 )
             elif "quota" in error_str.lower() or "limit" in error_str.lower():
                 raise ValueError(
-                    f"Квота вичерпана для {self.provider}\n\nДеталі: {error_str[:300]}"
+                    f"Квота вичерпана для {self.provider}\n\nДеталі: {error_str[:1000]}\n\nrepr={error_repr[:500]}\n\nargs={error_args[:500]}{cause_str}{status_str}{response_str}"
+                )
+            elif "Connection" in error_str:
+                raise ValueError(
+                    f"Помилка з'єднання: Перевірте інтернет.\n\nДеталі: {error_str[:1000]}\n\nrepr={error_repr[:500]}\n\nargs={error_args[:500]}{cause_str}{status_str}{response_str}"
                 )
             else:
-                raise ValueError(f"Помилка {self.provider}: {error_str[:300]}")
+                raise ValueError(
+                    f"Помилка {self.provider}: {error_str[:1000]}\n\nrepr={error_repr[:500]}\n\nargs={error_args[:500]}{cause_str}{status_str}{response_str}"
+                )
 
 
 SYSTEM_PROMPT = """Ти - науковий консультант для атестаційної комісії (разової спеціалізованої вченої ради, РСВР) в Україні станом на 2026 рік.
@@ -1478,13 +1893,13 @@ SYSTEM_PROMPT = """Ти - науковий консультант для ате�
 ============================================================
 - Аналіз кандидатів на членство в РСВР або на присвоєння наукового ступеня
 - Дані збираються автоматично з ORCID, Google Scholar, OpenAlex
-- Релевантність публікацій оцінюється за ключовими словами (score 0-5)
-- Придатна публікація: score > 0 та відповідає критеріям 2026 року
+- Автоматичний score (0-5) — це ЛИШЕ ОРІЄНТИР для попередньої оцінки
+- Автоматичний verdict — це ЛИШЕ ПІДКАЗКА, а не остаточний вердикт
+- ТИ ПОВИНЕН використовувати ВЛАСНЕ АНАЛІТИЧНЕ МИСЛЕННЯ для остаточної оцінки
 
 СТРУКТУРА ДАНИХ:
 - Кандидати позначаються ID: cand_0, cand_1, cand_2, etc.
 - Період аналізу: останні 5 років (критерій законодавства)
-- Verdict: "Відповідає вимогам" якщо ≥3 придатних публікацій (score > 0) і немає конфлікту інтересів
 
 ПРИ ОЦІНЦІ КАНДИДАТІВ ЗВЕРТАЙ УВАГУ:
 - Чи є публікації після отримання ступеня PhD?
@@ -1494,70 +1909,52 @@ SYSTEM_PROMPT = """Ти - науковий консультант для ате�
 - Чи немає публікацій у виданнях держави-агресора?
 - Чи дотримано трирічний «карантин» після власного захисту?
 
-ЗАПИТ ДАНИХ (тільки коли реально потрібно):
-[GET:cand_0] - повні дані кандидата (публікації по роках, всі ключові слова)
-[GET:cand_0:summary] - короткий підсумок кандидата
-[GET:cand_0:papers] - публікації агреговані по роках
-[GET:cand_0:papers:2024] - публікації за конкретний рік
-[GET:cand_0:paper:2024:0] - деталі конкретної публікації (рік, індекс)
-[COMPARE:cand_0:cand_1] - порівняння двох кандидатів (дивись розділ ПОРІВНЯННЯ нижче)
-[GET:BANNED] - отримати список загальних виключених ключових слів
-[GET:cand_0:BANNED] - отримати список виключених ключових слів конкретного кандидата
-[ADD_BANNED:слово] - додати ключове слово до загальних виключень
-[ADD_BANNED:cand_0:слово] - додати ключове слово до виключень конкретного кандидата
+============================================================
+АЛГОРИТМ ВИКОРИСТАННЯ ІНСТРУМЕНТІВ (FUNCTION CALLING)
+============================================================
+Ти маєш доступ до нативних інструментів (tools). Дія за наступним алгоритмом:
 
-ПОШУК В ІНТЕРНЕТІ (ВИКОРИСТОВУЙ АКТИВНО!):
-Використовуй [SEARCH:запит] коли потрібно:
-- Знайти актуальні наукові статті з теми дисертації
-- Перевірити journal ranking (Scopus quartile, Web of Science)
-- Знайти інформацію про науковця чи установу
-- Отримати дані про цитування
-- Знайти recent research не в твоїх даних
-- Перевірити якість журналу (чи є в Scopus/WoS, чи не «хижацький»)
-- Перевірити статус фахового видання України (категорія А/Б)
-- ПРОАКТИВНО шукай, якщо кандидат має мало публікацій у твоїх даних
+КРОК 1: ОТРИМАННЯ ДАНИХ ПРО КАНДИДАТІВ (ВНУТРІШНЯ БАЗА)
+- КОЖНОМУ кандидату з контекстуВИКЛИКАЙ `get_candidate_data` з його ID
+- ЦЕ ОБОВ'ЯЗКОВО: отримати повний список публікацій по роках, abstract, matched_details
+- НЕ продовжуй аналіз поки не отримаєш дані ВСІХ кандидатів
+- ЯКЩО у кандидата 0 публікацій — ДОВІРЯЙ БАЗІ, не шукай додатково без прямої вказівки користувача
 
-ПОВЕДІНКА ПРИ ПОШУКУ:
-1) Сформулюй запит так, щоб отримати релевантні результати для перевірки
-2) Проаналізуй результати
-3) ЯКЩО знайдено релевантні публікації кандидата - інтегруй у аналіз
-4) ЯКЩО не знайдено - зазнач обмеженість даних і запропонуй додаткові джерела
+КРОК 2: ПОРІВНЯННЯ (ЯКЩО Є 2+ КАНДИДАТИ)
+- Виклич `compare_candidates` з масивом ID кандидатів
+- Це дасть структуроване порівняння публікацій та ключових слів
 
-OPENALEX API (використовуй для детальних даних про авторів):
-[OPENALEX:works:search term] - search scientific papers on OpenAlex
-[OPENALEX:concepts:field name] - get OpenAlex concept ID for a field
-[OPENALEX:authors:author name] - find author ID and detailed citation metrics
+КРОК 3: ПОШУК ДЕТАЛЕЙ В GOOGLE SCHOLAR (КРАЙНІО ЗАСІБ)
+- УВАГА: Google Scholar дуже повільний (15+ секунд на запит). Використовуй ТІЛЬКИ якщо:
+  * Внутрідані кандидата ДЕЙСТВІТЕЛЬНО не мають abstract І
+  * Користувач ЯВНО попросив перевірити автора в Google Scholar
+- ЗАБОРОНЕНО: використовувати `scholar_search` для основного аналізу - достатньо даних з `get_candidate_data`
+- Якщо use scholar_search - спочатку спробуй `action_type="author_id"` (швидше)
+- НЕ роби висновків про експертизу лише за назвами статей!
 
-Приклади:
-[SEARCH:journal quartile Q1 Q2 information systems Ukraine 2025]
-[SEARCH:Scopus indexed journals Ukraine category A B 2026]
-[SEARCH:opponent expert database Ukraine PhD defense]
+КРОК 4: WEB ПОШУК (ТІЛЬКИ ЯКЩО НЕОБХІДНО)
+- Використовуй `web_search` для перевірки:
+  - Journal ranking (Scopus quartile)
+  - Статус фахового видання України (категорія А/Б)
+  - Чи не "хижацький" журнал
+- ПІСЛЯ `web_search` ЯКЩО знайдено релевантний URL → виклич `fetch_page`
 
-ПОРІВНЯННЯ КАНДИДАТІВ [COMPARE]:
-Коли отримаєш дані - аналізуй і виводь у структурованому вигляді:
-1) Публікаційний доробок: кількість, свіжість, тематична релевантність
-2) Конфлікти інтересів: виявлені або потенційні
-3) Відповідність критеріям 2026 року: що пройдено, що ні
-4) РЕКОМЕНДАЦІЯ: кого обрати і чому (або чому обох відхилити)
+ЗАБОРОНЕНО:
+- Робити висновки на основі лише сніпетів з web_search
+- Пропускати КРОК 1 і одразу переходити до пошуку
+- Робити фінальну рекомендацію без повних даних про публікації
+- Сліпо покладатися на автоматичний score (0-5) — він лише орієнтир
+- Приймати автоматичний verdict як остаточний — ти ПОВИНЕН проаналізувати сам
 
-ПРАВИЛА:
-- НЕ пиши [GET...], [COMPARE...] або [ADD_BANNED...] в повідомленнях користувачу - вони для внутреннього використання
-- НЕ пиши [SEARCH...] в повідомленнях користувачу - вони для внутреннього використання
-- ВІДПОВІДАЙ природною українською мовою
-- Звертайся до кандидатів за іменем (Петренко І.І., не cand_0)
-- Будь об'єктивним та конструктивним
-- Вказуй конкретні проблеми та рекомендації з посиланням на нормативні вимоги
-- Після відповіді пропонуй можливі наступні кроки
-- Якщо рекомендуєш виключити якесь слово загалом - використай [ADD_BANNED:слово], якщо лише для кандидата - [ADD_BANNED:cand_0:слово]
-- Якщо потрібна актуальна інформація - використай [SEARCH:запит]
-- При оцінці кандидатів ОБОВ'ЯЗКОВО перевіряй відсутність конфлікту інтересів та відповідність наукометричним критеріям 2026 року
-- ЯКЩО запит виходить за межі PhD атестації - ввічливо повідом і запропонуй релевантну альтернативу
-- ЯКЩО дані обмежені або неточні - повідом користувача і запропонуй шляхи верифікації
+ТИ ПОВИНЕН:
+- Читати abstract публікацій і робити ВЛАСНІ висновки про релевантність
+- Оцінювати науковий внесок кандидата, а не лише кількість публікацій
+- ДУМАТИ критично: чи дійсно публікація відповідає темі дисертації?
+- ЗВЕРТАТИ УВАГУ на якість журналу, а не лише на збіг ключових слів
 
-ПОВЕДІНКА ПРИ ПОМИЛКАХ ТА ОБМЕЖЕННЯХ:
-- Якщо [GET...] повернув помилку: повідом користувача, запропонуй переформулювати запит
-- Якщо [SEARCH...] не знайшов результатів: зазнач це і запропонуй альтернативні запити
-- Якщо кандидатів немає в даних: запропонуй додати їх або використати пошук
+Для керування списком заборонених слів використовуй `manage_banned_keywords`.
+
+ПРАВИЛА ФОРМАТУВАННЯ ВІДПОВІДІ ЗАЛИШАЮТЬСЯ НЕЗМІННИМИ (використовуй Markdown, таблиці, та теги [ARTIFACT] для збереження результатів).
 
 ===============================================================
 ВИКОРИСТАННЯ МАРКДАУНУ У ВІДПОВІДЯХ
@@ -1643,26 +2040,37 @@ class AIAdvisorApp:
         self.artifacts = []
         self.ai_responding = False
         self.stop_response = False
+        self._saved_api_keys = {}
 
         self._select_project_window()
 
     def get_state_for_session(self, pin: str = None) -> Dict:
-        if not self.current_api_key:
+        if not self.current_api_key and not self._saved_api_keys:
             return None
 
-        api_key_to_store = self.current_api_key
+        def encrypt_key(key):
+            if pin:
+                return "enc:" + encrypt_with_embedded_pin_hash(key, pin)
+            return key
 
-        if pin:
-            api_key_to_store = "enc:" + encrypt_with_embedded_pin_hash(
-                self.current_api_key, pin
-            )
+        saved_keys_encrypted = {}
+        for provider_key, data in self._saved_api_keys.items():
+            saved_keys_encrypted[provider_key] = {
+                "api_key": encrypt_key(data.get("api_key", "")),
+                "model": data.get("model", ""),
+            }
+
+        current_key_encrypted = (
+            encrypt_key(self.current_api_key) if self.current_api_key else ""
+        )
 
         state = {
             "provider": self.current_provider,
             "model": self.current_model,
-            "api_key": api_key_to_store,
+            "api_key": current_key_encrypted,
             "chat_history": self.chat_history,
             "artifacts": self.artifacts,
+            "saved_api_keys": saved_keys_encrypted,
         }
 
         return state
@@ -1676,18 +2084,34 @@ class AIAdvisorApp:
         api_key_encrypted = state.get("api_key")
         chat_history = state.get("chat_history")
         artifacts = state.get("artifacts", [])
+        saved_keys_encrypted = state.get("saved_api_keys", {})
 
-        if api_key_encrypted:
-            if pin and api_key_encrypted.startswith("enc:"):
+        def decrypt_key(encrypted_key):
+            if pin and encrypted_key.startswith("enc:"):
                 pin_hash, api_key = decrypt_with_embedded_pin_hash(
-                    api_key_encrypted[4:], pin
+                    encrypted_key[4:], pin
                 )
                 if pin_hash is None:
-                    return False
-            elif not api_key_encrypted.startswith("enc:"):
-                api_key = api_key_encrypted
-            else:
+                    return None
+                return api_key
+            elif not encrypted_key.startswith("enc:"):
+                return encrypted_key
+            return None
+
+        if api_key_encrypted:
+            api_key = decrypt_key(api_key_encrypted)
+            if api_key is None:
                 return False
+
+        if saved_keys_encrypted:
+            self._saved_api_keys = {}
+            for provider_key, data in saved_keys_encrypted.items():
+                decrypted_key = decrypt_key(data.get("api_key", ""))
+                if decrypted_key:
+                    self._saved_api_keys[provider_key] = {
+                        "api_key": decrypted_key,
+                        "model": data.get("model", ""),
+                    }
 
         if chat_history:
             self.chat_history = chat_history
@@ -1802,11 +2226,13 @@ class AIAdvisorApp:
                     provider_key = key
                     break
             if provider_key:
-                default_model = AIProvider.PROVIDER_DEFAULT_MODELS.get(
-                    provider_key, "default"
-                )
-                model_combo["values"] = [default_model]
-                model_var.set(default_model)
+                default_model = AIProvider.PROVIDER_DEFAULT_MODELS.get(provider_key)
+                if default_model:
+                    model_combo["values"] = [default_model]
+                    model_var.set(default_model)
+                else:
+                    model_combo["values"] = ["(спершу введіть API ключ)"]
+                    model_var.set("")
 
         def fetch_models_for_provider():
             provider_key = None
@@ -1815,19 +2241,26 @@ class AIAdvisorApp:
                     provider_key = key
                     break
             if not provider_key or not key_var.get().strip():
-                status_label.config(text="Введіть API ключ для отримання моделей")
                 return
-            status_label.config(text="Завантаження моделей...")
             try:
                 temp_provider = AIProvider(key_var.get().strip(), provider_key)
                 models = temp_provider.get_available_models()
                 if models:
-                    model_combo.after(0, lambda m=models: update_model_list(m))
+                    update_model_list(models)
                     status_label.config(text=f"Знайдено {len(models)} моделей")
                 else:
                     status_label.config(text="Моделі не знайдено")
+                    messagebox.showwarning(
+                        "Увага",
+                        "Моделі не знайдено для цього провайдера",
+                        parent=dialog,
+                    )
             except Exception as e:
-                status_label.config(text=f"Помилка: {str(e)[:50]}")
+                error_msg = str(e)
+                status_label.config(text=f"Помилка: {error_msg[:50]}")
+                messagebox.showerror(
+                    "Помилка завантаження моделей", error_msg, parent=dialog
+                )
 
         def update_model_list(models):
             model_combo["values"] = models
@@ -1842,23 +2275,31 @@ class AIAdvisorApp:
                     break
             if provider_key and key_var.get().strip():
                 model = model_var.get().strip() if model_var.get().strip() else None
+                self._saved_api_keys[provider_key] = {
+                    "api_key": key_var.get().strip(),
+                    "model": model if model else "",
+                }
                 self._start_with_api_key(
                     provider_key, key_var.get().strip(), dialog, model
                 )
             else:
-                messagebox.showwarning("Увага", "Введіть API ключ")
+                messagebox.showwarning("Увага", "Введіть API ключ", parent=dialog)
+
+        def auto_fetch_models(*args):
+            if key_var.get().strip():
+                fetch_models_for_provider()
 
         provider_combo.bind("<<ComboboxSelected>>", update_default_model)
-        key_entry.bind("<KeyRelease>", lambda e: status_label.config(text=""))
+        key_entry.bind("<KeyRelease>", auto_fetch_models)
+        key_entry.bind(
+            "<Control-v>",
+            lambda e: [key_entry.after_idle(auto_fetch_models)]
+            if key_var.get().strip()
+            else None,
+        )
 
         btn_frame = ttk.Frame(main_frame)
         btn_frame.pack(fill="x")
-        ttk.Button(
-            btn_frame,
-            text="Оновити моделі",
-            command=fetch_models_for_provider,
-            width=15,
-        ).pack(side="left", padx=5)
         ttk.Button(btn_frame, text="Скасувати", command=dialog.destroy, width=12).pack(
             side="left", padx=5
         )
@@ -1881,11 +2322,20 @@ class AIAdvisorApp:
         try:
             self.ai_provider = AIProvider(api_key, provider)
         except Exception as e:
-            messagebox.showerror("Помилка", f"Не вдалося підключитися: {str(e)}")
+            messagebox.showerror(
+                "Помилка", f"Не вдалося підключитися: {str(e)}", parent=self.parent
+            )
             return
 
         if chat_history:
             self.chat_history = chat_history
+
+        if self._restore_state and self._restore_state.get("saved_api_keys"):
+            for pk, kdata in self._restore_state["saved_api_keys"].items():
+                self._saved_api_keys[pk] = {
+                    "api_key": kdata.get("api_key", ""),
+                    "model": kdata.get("model", ""),
+                }
 
         self._build_main_window()
 
@@ -1924,7 +2374,9 @@ class AIAdvisorApp:
             if api_key.startswith("enc:"):
                 pin_hash, api_key = decrypt_with_embedded_pin_hash(api_key[4:], pin)
                 if pin_hash is None:
-                    messagebox.showerror("Помилка", "Невірний PIN")
+                    messagebox.showerror(
+                        "Помилка", "Невірний PIN", parent=self.pin_window
+                    )
                     self.pin_var.set("")
                     return
 
@@ -2227,6 +2679,279 @@ class AIAdvisorApp:
         else:
             self.send_btn.config(text="Надіслати", style="TButton")
 
+    def _get_tools_schema(self) -> List[Dict]:
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_candidate_data",
+                    "description": "Отримати детальні дані, статистику та список публікацій кандидата з внутрішньої бази",
+                    "strict": False,
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "cand_id": {
+                                "type": "string",
+                                "description": "ID кандидата (наприклад, cand_0)",
+                            }
+                        },
+                        "required": ["cand_id"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "compare_candidates",
+                    "description": "Порівняти двох або більше кандидатів за їх науковими профілями",
+                    "strict": False,
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "cand_ids": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "Список ID кандидатів (наприклад, ['cand_0', 'cand_1'])",
+                            }
+                        },
+                        "required": ["cand_ids"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "web_search",
+                    "description": "Шукати інформацію в інтернеті. Повертає короткі сніпети.",
+                    "strict": False,
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {
+                                "type": "string",
+                                "description": "Пошуковий запит",
+                            },
+                            "num_results": {
+                                "type": "integer",
+                                "description": "Кількість результатів (за замовчуванням 5)",
+                            },
+                        },
+                        "required": ["query"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "fetch_page",
+                    "description": "Отримати повний текстовий вміст веб-сторінки за URL. ВИКОРИСТОВУВАТИ ОБОВ'ЯЗКОВО після web_search, якщо знайдено релевантний лінк.",
+                    "strict": False,
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "url": {
+                                "type": "string",
+                                "description": "URL адреса сторінки",
+                            }
+                        },
+                        "required": ["url"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "scholar_search",
+                    "description": "Шукати публікації або профілі авторів у Google Scholar. ВАЖЛИВО: для отримання abstract публікацій обов'язково став detailed=True",
+                    "strict": False,
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "action_type": {
+                                "type": "string",
+                                "enum": ["search_query", "author_name", "author_id"],
+                                "description": "search_query = шукати статті, author_name = профіль автора, author_id = профіль за GS ID",
+                            },
+                            "query": {
+                                "type": "string",
+                                "description": "Текст запиту, ім'я автора або Google Scholar ID (наприклад, m1Lx2fYAAAAJ)",
+                            },
+                            "detailed": {
+                                "type": "boolean",
+                                "description": "ОБОВ'ЯЗКОВО=true для отримання abstract публікацій. Без abstract неможливо оцінити релевантність!",
+                            },
+                        },
+                        "required": ["action_type", "query"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "openalex_search",
+                    "description": "Шукати публікації, концепти або авторів в OpenAlex",
+                    "strict": False,
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "entity_type": {
+                                "type": "string",
+                                "enum": ["works", "concepts", "authors"],
+                                "description": "Тип сутності для пошуку",
+                            },
+                            "query": {
+                                "type": "string",
+                                "description": "Пошуковий запит",
+                            },
+                        },
+                        "required": ["entity_type", "query"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "manage_banned_keywords",
+                    "description": "Керувати списком заборонених ключових слів",
+                    "strict": False,
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "action": {
+                                "type": "string",
+                                "enum": ["get", "add"],
+                                "description": "Дія: отримати список або додати слово",
+                            },
+                            "keyword": {
+                                "type": "string",
+                                "description": "Ключове слово для додавання",
+                            },
+                            "cand_id": {
+                                "type": "string",
+                                "description": "ID кандидата (якщо слово для конкретного кандидата)",
+                            },
+                        },
+                        "required": ["action"],
+                    },
+                },
+            },
+        ]
+        return tools
+
+    def _execute_tool_call(self, tool_name: str, arguments: dict) -> str:
+        try:
+            if tool_name == "get_candidate_data":
+                cand_id = arguments.get("cand_id")
+                detailed = self.analysis_data.get_detailed(cand_id)
+                if not detailed:
+                    return f"Помилка: кандидата з ID {cand_id} не знайдено."
+
+                result = self._format_detailed_candidate(detailed) + "\n\n"
+                papers = self.analysis_data.get_papers_by_year(cand_id)
+                if papers:
+                    result += self._format_papers_by_year(papers)
+                return result
+
+            elif tool_name == "compare_candidates":
+                ids = arguments.get("cand_ids", [])
+                comparison = self.analysis_data.compare_candidates(ids)
+                return self._format_comparison(comparison)
+
+            elif tool_name == "web_search":
+                query = arguments.get("query")
+                num = arguments.get("num_results", 5)
+                res = web_search(query, num)
+
+                artifact_content = format_search_results(res)
+                self.artifacts.append(
+                    {
+                        "type": "search_result",
+                        "content": artifact_content,
+                        "query": query,
+                        "timestamp": datetime.now().isoformat(),
+                    }
+                )
+                self.window.after(
+                    0,
+                    lambda a={
+                        "type": "search_result",
+                        "content": artifact_content,
+                        "query": query,
+                    }: self._update_artifacts_listbox([a]),
+                )
+
+                return artifact_content
+
+            elif tool_name == "fetch_page":
+                url = arguments.get("url")
+                res = fetch_url_content(url)
+                return format_fetch_result(res)
+
+            elif tool_name == "scholar_search":
+                action = arguments.get("action_type")
+                query = arguments.get("query")
+                detailed = arguments.get("detailed", False)
+
+                if action == "search_query":
+                    res = search_google_scholar(query, fetch_details=detailed)
+                    return format_scholar_result(res, detailed=detailed)
+                elif action == "author_name":
+                    res = search_google_scholar_author(
+                        author_name=query, max_results=20
+                    )
+                    return format_scholar_author_result(res)
+                elif action == "author_id":
+                    res = search_google_scholar_author(
+                        author_name="", max_results=20, scholar_id=query
+                    )
+                    return format_scholar_author_result(res)
+
+            elif tool_name == "openalex_search":
+                entity_type = arguments.get("entity_type")
+                query = arguments.get("query")
+
+                if entity_type == "works":
+                    res = search_works(query)
+                    return format_works_result(res)
+                elif entity_type == "concepts":
+                    res = search_concepts(query)
+                    return format_concepts_result(res)
+                elif entity_type == "authors":
+                    res = search_authors(query)
+                    return format_authors_result(res)
+
+            elif tool_name == "manage_banned_keywords":
+                action = arguments.get("action")
+
+                if action == "get":
+                    cand_id = arguments.get("cand_id")
+                    banned = self.analysis_data.get_banned_keywords(cand_id)
+                    return f"Виключені ключові слова ({len(banned)}): {', '.join(banned) if banned else 'немає'}"
+                elif action == "add":
+                    keyword = arguments.get("keyword", "")
+                    cand_id = arguments.get("cand_id")
+                    if cand_id:
+                        success = self.analysis_data.add_banned_keyword(
+                            keyword, cand_id
+                        )
+                        name = self.analysis_data.get_name(cand_id)
+                        return (
+                            f"Додано '{keyword}' до виключень кандидата {name}"
+                            if success
+                            else f"'{keyword}' вже є у виключеннях кандидата {name}"
+                        )
+                    else:
+                        success = self.analysis_data.add_banned_keyword(keyword)
+                        return (
+                            f"Додано '{keyword}' до загальних виключень"
+                            if success
+                            else f"'{keyword}' вже є у загальних виключеннях"
+                        )
+
+            return f"Помилка: Інструмент {tool_name} не знайдено."
+        except Exception as e:
+            return f"Помилка виконання інструменту {tool_name}: {str(e)}"
+
     def _process_data_requests(self, requests: List[str]) -> Dict[str, Any]:
         results = {}
 
@@ -2404,6 +3129,40 @@ class AIAdvisorApp:
 
                     results[f"OPENALEX:{query}"] = formatted
 
+            elif action == "SCHOLAR":
+                for query in ids:
+                    parts = query.split(":", 1)
+                    subaction = parts[0] if len(parts) > 0 else ""
+                    rest = parts[1] if len(parts) > 1 else ""
+
+                    if subaction == "author":
+                        author_query = rest.replace(":detailed", "").strip()
+                        fetch_details = "detailed" in rest
+                        result = search_google_scholar_author(
+                            author_query, max_results=20
+                        )
+                        formatted = format_scholar_author_result(result)
+                    elif subaction == "profile":
+                        profile_id = rest.replace(":detailed", "").strip()
+                        fetch_details = "detailed" in rest
+                        result = search_google_scholar_author(
+                            author_name="", max_results=20, scholar_id=profile_id
+                        )
+                        formatted = format_scholar_author_result(result)
+                    else:
+                        result = search_google_scholar(query, max_results=10)
+                        formatted = format_scholar_result(result, detailed=False)
+
+                    results[f"SCHOLAR:{query}"] = formatted
+
+            elif action == "FETCH":
+                for query in ids:
+                    url = query.strip()
+                    if url:
+                        result = fetch_url_content(url)
+                        formatted = format_fetch_result(result)
+                        results[f"FETCH:{url}"] = formatted
+
         return results
 
     def _format_brief_summary(self, brief: BriefSummary) -> str:
@@ -2507,46 +3266,184 @@ Top ключові слова: {", ".join(brief.top_keywords[:8]) if brief.top_k
     def _get_ai_response(self, user_message: str):
         try:
             messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-
-            id_to_name = self.analysis_data._id_to_name
             initial_context = self.analysis_data.build_initial_context(
                 self.selected_cand_ids
             )
+            context_prompt = f"КОНТЕКСТ:\n{initial_context}\n---\nКористувач запитує: {user_message}\n---"
 
-            context_prompt = f"""КОНТЕКСТ:
-{initial_context}
-
----
-Користувач запитує: {user_message}
----
-"""
-            messages.append({"role": "user", "content": context_prompt})
             messages.extend(self.chat_history[-8:])
-
-            self.window.after(0, lambda: self._show_thinking())
+            messages.append({"role": "user", "content": context_prompt})
 
             self._streaming_buffer = ""
+            tools = self._get_tools_schema()
+
+            max_loops = 10
+            loop_count = 0
+            final_response = ""
+            recent_content = ""
+
             self.window.after(0, lambda: self._start_streaming())
+            self.window.after(0, lambda: self._show_thinking("Думаємо..."))
 
-            full_response = []
-
-            for chunk in self.ai_provider.chat_stream(messages):
+            while loop_count < max_loops:
                 if self.stop_response:
                     break
-                full_response.append(chunk)
-                self.window.after(0, lambda c=chunk: self._append_streaming_chunk(c))
+
+                model = (
+                    self.current_model
+                    if self.current_model
+                    and self.current_model not in ("", "(спершу введіть API ключ)")
+                    else AIProvider.PROVIDER_DEFAULT_MODELS.get(self.current_provider)
+                )
+
+                if not model:
+                    self.window.after(
+                        0,
+                        lambda: self._append_chat(
+                            "system",
+                            "Помилка: модель не вибрано. Оберіть модель у налаштуваннях.",
+                        ),
+                    )
+                    self.ai_responding = False
+                    self._update_send_button()
+                    return
+
+                if self.ai_provider.provider == "google":
+                    model = (
+                        model.replace("models/", "")
+                        .replace("vertex_ai/", "")
+                        .replace("gemini/", "")
+                    )
+                    full_model = f"gemini/{model}"
+                else:
+                    full_model = (
+                        model
+                        if "/" in model
+                        else f"{self.ai_provider.provider}/{model}"
+                    )
+
+                kwargs = {
+                    "model": full_model,
+                    "messages": messages,
+                    "temperature": 0.5,
+                    "tools": tools,
+                    "tool_choice": "auto",
+                    "timeout": 120,
+                }
+
+                if self.ai_provider.provider == "google":
+                    kwargs["api_key"] = self.ai_provider.api_key
+                    kwargs["timeout"] = 180
+                elif self.ai_provider.provider == "deepseek":
+                    kwargs["api_key"] = self.ai_provider.api_key
+                    kwargs["api_base"] = self.ai_provider.get_api_base()
+                    kwargs["max_tokens"] = 8192
+                else:
+                    kwargs["api_key"] = self.ai_provider.api_key
+                    kwargs["api_base"] = self.ai_provider.get_api_base()
+
+                response = litellm.completion(**kwargs)
+                message = response.choices[0].message
+
+                if hasattr(message, "tool_calls") and message.tool_calls:
+                    if message.content:
+                        if recent_content:
+                            recent_content += "\n" + message.content
+                        else:
+                            recent_content = message.content
+                        messages.append(
+                            {
+                                "role": "assistant",
+                                "content": message.content,
+                            }
+                        )
+                    msg_dict = message.model_dump()
+                    content_val = msg_dict.get("content")
+                    if self.ai_provider.provider == "deepseek":
+                        if content_val is None or content_val == []:
+                            msg_dict["content"] = ""
+                    messages.append(msg_dict)
+
+                    for tool_call in message.tool_calls:
+                        if self.stop_response:
+                            break
+
+                        tool_name = tool_call.function.name
+                        try:
+                            args = json.loads(tool_call.function.arguments)
+                        except:
+                            args = {}
+
+                        display_name = TOOL_DISPLAY_NAMES.get(tool_name, tool_name)
+                        self.window.after(
+                            0,
+                            lambda dn=display_name: self._show_thinking(
+                                f"Використовую: {dn}..."
+                            ),
+                        )
+
+                        result = self._execute_tool_call(tool_name, args)
+
+                        if result is None:
+                            result = f"[Помилка виконання: {display_name} - порожня відповідь]"
+                        elif str(result).strip() == "":
+                            result = f"[{display_name} повернув порожній результат]"
+
+                        tool_id = getattr(tool_call, "id", None) or f"call_{loop_count}"
+                        messages.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": tool_id,
+                                "name": tool_name,
+                                "content": str(result),
+                            }
+                        )
+
+                    loop_count += 1
+                    continue
+
+                final_response = message.content or ""
+                if not final_response:
+                    finish_reason = (
+                        response.choices[0].finish_reason
+                        if hasattr(response.choices[0], "finish_reason")
+                        else "unknown"
+                    )
+                    debug_info = f"Empty response. finish_reason={finish_reason}, message keys={dir(message)}"
+                    self.window.after(
+                        0, lambda d=debug_info: self._append_chat("system", d)
+                    )
+                    final_response = (
+                        f"[Пуста відповідь від моделі. finish_reason={finish_reason}]"
+                    )
+                break
+
+            if not final_response and recent_content:
+                final_response = recent_content
 
             if self.stop_response:
                 self.ai_responding = False
                 self._update_send_button()
                 return
 
-            response = "".join(full_response)
-            self.chat_history.append({"role": "assistant", "content": response})
-
             self.window.after(0, lambda: self._hide_thinking())
 
-            response, artifacts = DataRequestParser.convert_artifacts_to_html(response)
+            chunk_size = 4
+            words = final_response.split(" ")
+            for i in range(0, len(words), chunk_size):
+                if self.stop_response:
+                    break
+                chunk = " ".join(words[i : i + chunk_size]) + " "
+                self.window.after(0, lambda c=chunk: self._append_streaming_chunk(c))
+                import time
+
+                time.sleep(0.02)
+
+            self.chat_history.append({"role": "assistant", "content": final_response})
+
+            html_ready_response, artifacts = (
+                DataRequestParser.convert_artifacts_to_html(final_response)
+            )
             if artifacts:
                 if not isinstance(self.artifacts, list):
                     self.artifacts = []
@@ -2555,99 +3452,32 @@ Top ключові слова: {", ".join(brief.top_keywords[:8]) if brief.top_k
                     0, lambda a=artifacts: self._update_artifacts_listbox(a)
                 )
 
-            requests = DataRequestParser.parse(response)
-
-            if not requests:
-                self.window.after(
-                    0, lambda r=response: self._finalize_streaming_message(r)
-                )
-            else:
-                parsed = DataRequestParser.extract_ids(requests)
-                request_names = []
-                for action, ids in parsed:
-                    if action == "ADD_BANNED":
-                        request_names.append(f"додати виключення: {ids[0]}")
-                    elif action == "GET" and ids[0] == "BANNED":
-                        request_names.append("список виключень")
-                    else:
-                        for i in ids:
-                            parts = i.split(":")
-                            cid = parts[0]
-                            name = self.analysis_data.get_name(cid)
-                            request_names.append(name)
-
-                self.window.after(
-                    0,
-                    lambda names=request_names: self._show_thinking(
-                        f"Думаємо... Запит даних: {', '.join(names)}"
-                    ),
-                )
-
-                results = self._process_data_requests(requests)
-
-                for req_id, result in results.items():
-                    self.window.after(
-                        0,
-                        lambda r=req_id, res=result: self._show_thinking(
-                            f"Думаємо... Отримано: {r}"
-                        ),
-                    )
-
-                continuation_prompt = "Отримані дані:\n"
-                for req, result in results.items():
-                    continuation_prompt += f"\n=== Результат [{req}] ===\n{result}\n"
-
-                continuation_prompt += "\nПродовж відповідь враховуючи ці дані."
-
-                messages.append({"role": "user", "content": continuation_prompt})
-
-                self.window.after(
-                    0, lambda: self._show_thinking("Думаємо... Аналізуємо дані")
-                )
-
-                full_response2 = []
-                for chunk in self.ai_provider.chat_stream(messages):
-                    if self.stop_response:
-                        break
-                    full_response2.append(chunk)
-                    self.window.after(
-                        0, lambda c=chunk: self._append_streaming_chunk(c)
-                    )
-
-                if self.stop_response:
-                    self.ai_responding = False
-                    self._update_send_button()
-                    return
-
-                response2 = "".join(full_response2)
-                self.chat_history.append({"role": "assistant", "content": response2})
-
-                self.window.after(0, lambda: self._hide_thinking())
-
-                response2, artifacts2 = DataRequestParser.convert_artifacts_to_html(
-                    response2
-                )
-                if artifacts2:
-                    if not isinstance(self.artifacts, list):
-                        self.artifacts = []
-                    self.artifacts.extend(artifacts2)
-                    self.window.after(
-                        0, lambda a=artifacts2: self._update_artifacts_listbox(a)
-                    )
-
-                combined_response = response + "\n\n" + response2
-                self.window.after(
-                    0,
-                    lambda r=combined_response: self._finalize_streaming_message(r),
-                )
-
+            self.window.after(
+                0, lambda r=html_ready_response: self._finalize_streaming_message(r)
+            )
             self.window.after(0, self._generate_suggestions)
+
             self.ai_responding = False
             self._update_send_button()
 
         except Exception as e:
             self.window.after(0, lambda: self._hide_thinking())
-            error_msg = f"Помилка: {str(e)}"
+            error_str = str(e)
+            error_repr = repr(e)
+            error_args = str(e.args) if e.args else "No args"
+            response_attr = getattr(e, "response", None)
+            status_code = getattr(e, "status_code", None)
+            message_attr = getattr(e, "message", None)
+            cause_attr = getattr(e, "__cause__", None)
+            cause_str = f" | __cause__: {str(cause_attr)[:300]}" if cause_attr else ""
+            status_str = f" | status_code: {status_code}" if status_code else ""
+            response_str = f" | Response: {response_attr}" if response_attr else ""
+            if "Timeout" in error_str or "timeout" in error_str.lower():
+                error_msg = f"⚠️ Таймаут з'єднання: {self.current_provider} не відповідає. Спробуйте пізніше або змініть провайдера."
+            elif "Connection" in error_str:
+                error_msg = f"⚠️ Помилка з'єднання: Перевірте інтернет-з'єднання."
+            else:
+                error_msg = f"Помилка: {error_str[:1000]}\n\nrepr={error_repr[:500]}\n\nargs={error_args[:500]}{cause_str}{status_str}{response_str}"
             self.window.after(0, lambda: self._append_chat("system", error_msg))
             self.ai_responding = False
             self._update_send_button()
@@ -2960,10 +3790,13 @@ dd {
         self._streaming_buffer += chunk
         word_count = len(self._streaming_buffer.split())
 
-        # Always keep _messages_html in sync so any forced render shows latest content
         display_text = self._strip_markers_for_display(self._streaming_buffer)
         html_content = self._markdown_to_html(display_text)
-        self._messages_html[-1] = f'<div class="ai-msg">{html_content}</div>'
+        msg_index = getattr(self, "_streaming_msg_index", -1)
+        if msg_index >= 0 and msg_index < len(self._messages_html):
+            self._messages_html[msg_index] = f'<div class="ai-msg">{html_content}</div>'
+        else:
+            self._messages_html[-1] = f'<div class="ai-msg">{html_content}</div>'
 
         # Update status label with live word count
         try:
@@ -2981,7 +3814,9 @@ dd {
     def _start_streaming(self):
         """Called on the main thread when AI streaming begins."""
         self._last_stream_word_count = 0
-        self._append_message("", "ai")  # clean HTML load + scroll to bottom
+        self._append_message("", "ai")
+        self._streaming_msg_index = len(self._messages_html) - 1
+        self._hide_thinking()
 
     def _bind_chat_scroll(self):
         """Bind mouse-wheel events to detect when the user manually scrolls up."""
@@ -3044,7 +3879,11 @@ dd {
     def _finalize_streaming_message(self, final_response: str):
         display_text = self._strip_markers_for_display(final_response)
         html_content = self._markdown_to_html(display_text)
-        self._messages_html[-1] = f'<div class="ai-msg">{html_content}</div>'
+        msg_index = getattr(self, "_streaming_msg_index", -1)
+        if msg_index >= 0 and msg_index < len(self._messages_html):
+            self._messages_html[msg_index] = f'<div class="ai-msg">{html_content}</div>'
+        else:
+            self._messages_html[-1] = f'<div class="ai-msg">{html_content}</div>'
         self._streaming_buffer = ""
         self._last_stream_word_count = 0
         # Clear the status label
@@ -3191,7 +4030,9 @@ dd {
 
     def _export_artifacts(self):
         if not self.artifacts:
-            messagebox.showinfo("Експорт", "Немає артефактів для експорту")
+            messagebox.showinfo(
+                "Експорт", "Немає артефактів для експорту", parent=self.window
+            )
             return
 
         path = filedialog.asksaveasfilename(
@@ -3200,166 +4041,354 @@ dd {
         if path:
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(self.artifacts, f, ensure_ascii=False, indent=2)
-            messagebox.showinfo("Експорт", "Артефакти збережено!")
+            messagebox.showinfo("Експорт", "Артефакти збережено!", parent=self.window)
 
     def _show_change_api_key_dialog(self):
         dialog = tk.Toplevel(self.window)
-        dialog.title("Зміна API ключа")
-        dialog.resizable(0, 0)
+        dialog.title("Налаштування AI")
+        dialog.geometry("650x400")
         dialog.transient(self.window)
         dialog.grab_set()
 
-        dialog.update_idletasks()
+        main_frame = ttk.Frame(dialog, padding="10")
+        main_frame.pack(fill="both", expand=True)
+
+        ttk.Label(
+            main_frame, text="Керування API ключами", font=("Arial", 14, "bold")
+        ).pack(anchor="w", pady=(0, 10))
+
+        paned = ttk.PanedWindow(main_frame, orient=tk.HORIZONTAL)
+        paned.pack(fill="both", expand=True)
+
+        left_frame = ttk.Frame(paned)
+        right_frame = ttk.Frame(paned)
+        paned.add(left_frame, weight=1)
+        paned.add(right_frame, weight=2)
+
+        ttk.Label(left_frame, text="Збережені ключі", font=("Arial", 11, "bold")).pack(
+            anchor="w", pady=(0, 5)
+        )
+
+        list_frame = ttk.Frame(left_frame)
+        list_frame.pack(fill="both", expand=True)
+
+        providers_listbox = tk.Listbox(list_frame, font=("Arial", 10), height=10)
+        providers_listbox.pack(side="left", fill="both", expand=True)
+
+        list_scroll = ttk.Scrollbar(
+            list_frame, orient="vertical", command=providers_listbox.yview
+        )
+        providers_listbox.config(yscrollcommand=list_scroll.set)
+        list_scroll.pack(side="right", fill="y")
+
+        def mask_key(key):
+            if not key or len(key) < 8:
+                return "***"
+            return key[:4] + "..." + key[-4:]
+
+        def populate_providers_list():
+            providers_listbox.delete(0, tk.END)
+            saved_providers = [
+                (pk, pn)
+                for pk, pn in AIProvider.PROVIDERS
+                if pk in self._saved_api_keys
+            ]
+
+            if not saved_providers:
+                providers_listbox.insert(0, "(немає)")
+                providers_listbox.itemconfig(0, fg="gray")
+            else:
+                for provider_key, provider_name in saved_providers:
+                    saved = self._saved_api_keys[provider_key]
+                    key_mask = mask_key(saved.get("api_key", ""))
+                    model = saved.get("model", "")
+                    model_short = (
+                        (model[:12] + "...")
+                        if model and len(model) > 12
+                        else (model or "-")
+                    )
+                    providers_listbox.insert(tk.END, f"{provider_name} [{model_short}]")
+
+        populate_providers_list()
+
+        ttk.Label(right_frame, text="Редагування", font=("Arial", 11, "bold")).pack(
+            anchor="w", pady=(0, 10)
+        )
+
+        detail_frame = ttk.LabelFrame(right_frame, text=" Провайдер ", padding="10")
+        detail_frame.pack(fill="x", pady=(0, 10))
+        detail_frame.pack_forget()
+
+        selected_provider_key = tk.StringVar()
+        selected_provider_name = tk.Label(
+            detail_frame, text="Оберіть зі списку", font=("Arial", 10)
+        )
+        selected_provider_name.pack(anchor="w")
+
+        model_frame = ttk.Frame(detail_frame)
+        model_frame.pack(fill="x", pady=(5, 5))
+        ttk.Label(model_frame, text="Модель:", width=10).pack(side="left")
+        model_var = tk.StringVar()
+        model_combo = ttk.Combobox(model_frame, textvariable=model_var, width=30)
+        model_combo.pack(side="left", fill="x", expand=True)
+
+        key_var = tk.StringVar()
+        show_key_var = tk.BooleanVar(value=False)
+
+        key_frame = ttk.Frame(detail_frame)
+        key_frame.pack(fill="x", pady=(5, 5))
+        ttk.Label(key_frame, text="API ключ:", width=10).pack(side="left")
+        key_entry = ttk.Entry(key_frame, textvariable=key_var, width=30, show="*")
+        key_entry.pack(side="left", fill="x", expand=True)
+        ttk.Checkbutton(key_frame, text="Показати", variable=show_key_var).pack(
+            side="left", padx=(5, 0)
+        )
+
+        def on_show_toggle():
+            if show_key_var.get():
+                key_entry.config(show="")
+            else:
+                key_entry.config(show="*")
+
+        show_key_var.trace_add("write", lambda *a: on_show_toggle())
+
+        def on_paste():
+            key_entry.config(show="")
+            show_key_var.set(True)
+            dialog.after(
+                2000,
+                lambda: (
+                    key_entry.config(show="*"),
+                    show_key_var.set(False),
+                    on_key_change(),
+                ),
+            )
+
+        key_entry.bind("<Control-v>", lambda e: (on_paste(), None))
+
+        status_label = tk.Label(detail_frame, text="", fg="gray", font=("Arial", 9))
+        status_label.pack(anchor="w", pady=(5, 0))
+
+        def on_key_change(*args):
+            key = key_var.get().strip()
+            provider_key = selected_provider_key.get()
+            if len(key) >= 10 and provider_key:
+                status_label.config(text="Завантажую моделі...")
+                dialog.update()
+                try:
+                    temp_provider = AIProvider(key, provider_key)
+                    models = temp_provider.get_available_models()
+                    if models:
+                        model_combo["values"] = models
+                        if not model_var.get() or model_var.get() not in models:
+                            model_var.set(models[0])
+                        status_label.config(
+                            text=f"Знайдено {len(models)} моделей", fg="green"
+                        )
+                    else:
+                        status_label.config(text="Моделі не знайдено")
+                except Exception as e:
+                    status_label.config(text=f"Помилка: {str(e)[:50]}")
+            elif len(key) >= 10:
+                status_label.config(text="Оберіть провайдера")
+            else:
+                status_label.config(text="")
+
+        key_entry.bind("<KeyRelease>", lambda e: on_key_change())
+        key_var.trace_add("write", on_key_change)
+
+        def on_provider_select(event):
+            selection = providers_listbox.curselection()
+            if not selection:
+                return
+            idx = selection[0]
+            saved_providers = [
+                (pk, pn)
+                for pk, pn in AIProvider.PROVIDERS
+                if pk in self._saved_api_keys
+            ]
+            if idx >= len(saved_providers):
+                return
+            provider_key, provider_name = saved_providers[idx]
+            selected_provider_key.set(provider_key)
+            selected_provider_name.config(text=f"{provider_name}")
+
+            saved = self._saved_api_keys[provider_key]
+            key_var.set(saved.get("api_key", ""))
+            show_key_var.set(False)
+            model_var.set(saved.get("model", ""))
+
+            detail_frame.pack(fill="x", pady=(0, 10))
+
+            key = saved.get("api_key", "")
+            if key and len(key) >= 10:
+                status_label.config(text="Завантажую моделі...")
+                dialog.update()
+                try:
+                    temp_provider = AIProvider(key, provider_key)
+                    models = temp_provider.get_available_models()
+                    if models:
+                        model_combo["values"] = models
+                        if not model_var.get() or model_var.get() not in models:
+                            model_var.set(models[0])
+                        status_label.config(
+                            text=f"Знайдено {len(models)} моделей", fg="green"
+                        )
+                    else:
+                        status_label.config(text="Моделі не знайдено")
+                except Exception as e:
+                    status_label.config(text=f"Помилка: {str(e)[:50]}")
+            else:
+                model_combo["values"] = []
+
+        providers_listbox.bind("<<ListboxSelect>>", on_provider_select)
+
+        def save_provider():
+            provider_key = selected_provider_key.get()
+            if not provider_key:
+                status_label.config(text="Оберіть провайдера")
+                return
+            key = key_var.get().strip()
+            model = model_var.get().strip()
+            if not key:
+                status_label.config(text="Введіть API ключ")
+                return
+            try:
+                AIProvider(key, provider_key)
+            except Exception as e:
+                status_label.config(text=f"Помилка: {str(e)[:50]}")
+                return
+            self._saved_api_keys[provider_key] = {"api_key": key, "model": model}
+            status_label.config(text="Збережено!", fg="green")
+            populate_providers_list()
+
+        def use_provider():
+            provider_key = selected_provider_key.get()
+            if not provider_key:
+                status_label.config(text="Оберіть провайдера")
+                return
+            if provider_key not in self._saved_api_keys:
+                status_label.config(text="Спершу збережіть ключ")
+                return
+            saved = self._saved_api_keys[provider_key]
+            key = saved.get("api_key", "")
+            model = saved.get("model", "")
+            if not key:
+                status_label.config(text="Ключ відсутній")
+                return
+            try:
+                self.ai_provider = AIProvider(key, provider_key)
+                self.current_provider = provider_key
+                self.current_model = model if model else None
+                self.current_api_key = key
+                provider_name = dict(AIProvider.PROVIDERS).get(
+                    provider_key, provider_key
+                )
+                messagebox.showinfo(
+                    "Успіх", f"Переключено на {provider_name}", parent=dialog
+                )
+                dialog.destroy()
+            except Exception as e:
+                status_label.config(text=f"Помилка: {str(e)[:50]}")
+
+        def delete_provider():
+            provider_key = selected_provider_key.get()
+            if not provider_key:
+                return
+            if provider_key in self._saved_api_keys:
+                del self._saved_api_keys[provider_key]
+                key_var.set("")
+                model_var.set("")
+                model_combo["values"] = []
+                populate_providers_list()
+                selected_provider_key.set("")
+                selected_provider_name.config(text="Оберіть зі списку")
+                detail_frame.pack_forget()
+                status_label.config(text="Видалено")
+
+        edit_btn_frame = ttk.Frame(detail_frame)
+        edit_btn_frame.pack(fill="x", pady=(5, 0))
+        ttk.Button(
+            edit_btn_frame, text="Зберегти", command=save_provider, width=10
+        ).pack(side="left", padx=2)
+        ttk.Button(
+            edit_btn_frame, text="Видалити", command=delete_provider, width=10
+        ).pack(side="left", padx=2)
+        ttk.Button(
+            edit_btn_frame, text="Використати", command=use_provider, width=10
+        ).pack(side="left", padx=2)
+
+        def add_new_provider():
+            add_dialog = tk.Toplevel(dialog)
+            add_dialog.title("Додати")
+            add_dialog.geometry("280x120")
+            add_dialog.transient(dialog)
+            add_dialog.grab_set()
+            add_dialog.update_idletasks()
+            x = (add_dialog.winfo_screenwidth() // 2) - (
+                add_dialog.winfo_reqwidth() // 2
+            )
+            y = (add_dialog.winfo_screenheight() // 2) - (
+                add_dialog.winfo_reqheight() // 2
+            )
+            add_dialog.geometry(f"+{x}+{y}")
+
+            ttk.Label(add_dialog, text="Провайдер:", font=("Arial", 11)).pack(pady=5)
+
+            add_var = tk.StringVar()
+            available = [
+                name
+                for key, name in AIProvider.PROVIDERS
+                if key not in self._saved_api_keys
+            ]
+
+            if not available:
+                ttk.Label(add_dialog, text="Всі додані", foreground="gray").pack(
+                    pady=15
+                )
+                ttk.Button(add_dialog, text="OK", command=add_dialog.destroy).pack()
+                return
+
+            add_combo = ttk.Combobox(
+                add_dialog,
+                textvariable=add_var,
+                values=available,
+                state="readonly",
+                width=22,
+            )
+            add_combo.pack(pady=5)
+            add_combo.current(0)
+
+            def do_add():
+                selected = add_var.get()
+                provider_key = dict((v, k) for k, v in AIProvider.PROVIDERS)[selected]
+                selected_provider_key.set(provider_key)
+                selected_provider_name.config(text=f"{selected}")
+                key_var.set("")
+                model_var.set("")
+                model_combo["values"] = []
+                show_key_var.set(False)
+                detail_frame.pack(fill="x", pady=(0, 10))
+                add_dialog.destroy()
+
+            ttk.Button(add_dialog, text="Додати", command=do_add).pack(pady=5)
+
+        bottom_btn_frame = ttk.Frame(main_frame)
+        bottom_btn_frame.pack(fill="x", pady=(5, 0))
+        ttk.Button(
+            bottom_btn_frame, text="Додати +", command=add_new_provider, width=12
+        ).pack(side="left", padx=2)
+        ttk.Button(
+            bottom_btn_frame, text="Закрити", command=dialog.destroy, width=12
+        ).pack(side="right", padx=2)
         x = (dialog.winfo_screenwidth() // 2) - (dialog.winfo_reqwidth() // 2)
         y = (dialog.winfo_screenheight() // 2) - (dialog.winfo_reqheight() // 2)
         dialog.geometry(f"+{x}+{y}")
 
-        main_frame = ttk.Frame(dialog, padding="25")
-        main_frame.pack(fill="both", expand=True)
-
-        ttk.Label(main_frame, text="Зміна API ключа", font=("Arial", 16, "bold")).pack(
-            pady=(0, 20)
-        )
-
-        current_provider = self.current_provider or "OpenAI"
-        current_model = self.current_model or ""
-        provider_names = [name for _, name in AIProvider.PROVIDERS]
-        current_provider_name = dict(AIProvider.PROVIDERS).get(
-            current_provider, current_provider
-        )
-
-        current_frame = ttk.LabelFrame(main_frame, text=" Поточний ключ ", padding="15")
-        current_frame.pack(fill="x", pady=(0, 15))
-        ttk.Label(current_frame, text=f"Провайдер: {current_provider_name}").pack(
-            anchor="w"
-        )
-        ttk.Label(
-            current_frame,
-            text=f"Модель: {current_model if current_model else '(default)'}",
-        ).pack(anchor="w")
-
-        input_frame = ttk.LabelFrame(main_frame, text=" Новий API ключ ", padding="15")
-        input_frame.pack(fill="x", pady=(0, 15))
-
-        row_provider = ttk.Frame(input_frame)
-        row_provider.pack(fill="x", pady=(0, 10))
-        ttk.Label(row_provider, text="Провайдер:", width=12).pack(
-            side="left", padx=(0, 5)
-        )
-        provider_var = tk.StringVar(value=current_provider_name)
-        provider_combo = ttk.Combobox(
-            row_provider,
-            textvariable=provider_var,
-            values=provider_names,
-            state="readonly",
-            width=25,
-        )
-        provider_combo.pack(side="left", fill="x", expand=True)
-
-        row_model = ttk.Frame(input_frame)
-        row_model.pack(fill="x", pady=(0, 10))
-        ttk.Label(row_model, text="Модель:", width=12).pack(side="left", padx=(0, 5))
-        model_var = tk.StringVar()
-        model_combo = ttk.Combobox(row_model, textvariable=model_var, width=25)
-        model_combo.pack(side="left", fill="x", expand=True)
-
-        row_key = ttk.Frame(input_frame)
-        row_key.pack(fill="x", pady=(0, 10))
-        ttk.Label(row_key, text="Ключ:", width=12).pack(side="left", padx=(0, 5))
-        key_var = tk.StringVar()
-        key_entry = ttk.Entry(row_key, textvariable=key_var)
-        key_entry.pack(side="left", fill="x", expand=True)
-
-        status_label = ttk.Label(
-            main_frame, text="", foreground="gray", font=("Arial", 9)
-        )
-        status_label.pack(pady=(0, 5))
-
-        def update_default_model(*args):
-            provider_key = None
-            for key, name in AIProvider.PROVIDERS:
-                if name == provider_var.get():
-                    provider_key = key
-                    break
-            if provider_key:
-                default_model = AIProvider.PROVIDER_DEFAULT_MODELS.get(
-                    provider_key, "default"
-                )
-                model_combo["values"] = [default_model]
-                model_var.set(default_model)
-
-        def fetch_models_for_provider():
-            provider_key = None
-            for key, name in AIProvider.PROVIDERS:
-                if name == provider_var.get():
-                    provider_key = key
-                    break
-            if not provider_key or not key_var.get().strip():
-                status_label.config(text="Введіть API ключ для отримання моделей")
-                return
-            status_label.config(text="Завантаження моделей...")
-            try:
-                temp_provider = AIProvider(key_var.get().strip(), provider_key)
-                models = temp_provider.get_available_models()
-                if models:
-                    model_combo.after(0, lambda m=models: update_model_list(m))
-                    status_label.config(text=f"Знайдено {len(models)} моделей")
-                else:
-                    status_label.config(text="Моделі не знайдено")
-            except Exception as e:
-                status_label.config(text=f"Помилка: {str(e)[:50]}")
-
-        def update_model_list(models):
-            model_combo["values"] = models
-            if models:
-                model_var.set(models[0])
-
-        def use_direct_key():
-            provider_key = None
-            for key, name in AIProvider.PROVIDERS:
-                if name == provider_var.get():
-                    provider_key = key
-                    break
-            if provider_key and key_var.get().strip():
-                model = model_var.get().strip() if model_var.get().strip() else None
-                try:
-                    new_provider = AIProvider(key_var.get().strip(), provider_key)
-                    self.current_provider = provider_key
-                    self.current_model = model
-                    self.current_api_key = key_var.get().strip()
-                    self.ai_provider = new_provider
-                    messagebox.showinfo("Успіх", "API ключ змінено!")
-                    dialog.destroy()
-                except Exception as e:
-                    messagebox.showerror(
-                        "Помилка", f"Не вдалося підключитися: {str(e)}"
-                    )
-            else:
-                messagebox.showwarning("Увага", "Введіть API ключ")
-
-        provider_combo.bind("<<ComboboxSelected>>", update_default_model)
-        key_entry.bind("<KeyRelease>", lambda e: status_label.config(text=""))
-
-        btn_frame = ttk.Frame(main_frame)
-        btn_frame.pack(fill="x")
-        ttk.Button(
-            btn_frame,
-            text="Оновити моделі",
-            command=fetch_models_for_provider,
-            width=15,
-        ).pack(side="left", padx=5)
-        ttk.Button(btn_frame, text="Скасувати", command=dialog.destroy, width=12).pack(
-            side="left", padx=5
-        )
-        ttk.Button(btn_frame, text="Зберегти", command=use_direct_key, width=12).pack(
-            side="right", padx=5
-        )
-
-        update_default_model()
-        key_entry.focus()
-
     def _clear_history(self):
-        if messagebox.askyesno("Очистити", "Очистити історію чату?"):
+        if messagebox.askyesno(
+            "Очистити", "Очистити історію чату?", parent=self.window
+        ):
             self.chat_history = []
             self._messages_html = []
             self._thinking_index = -1

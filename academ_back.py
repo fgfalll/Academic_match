@@ -535,6 +535,11 @@ class MonCouncilProApp:
                 "global_banned_keywords": self.global_banned_keywords,
                 "all_candidates": self.all_candidates,
                 "all_papers": self.all_papers,
+                "selected_cand_ids": [
+                    self.advice_cid_map[i]
+                    for i in self.advice_listbox.curselection()
+                    if i < len(self.advice_cid_map)
+                ],
             },
         }
 
@@ -568,12 +573,18 @@ class MonCouncilProApp:
         self.global_banned_keywords = state.get("global_banned_keywords", [])
         self.all_candidates = state.get("all_candidates", {})
         self.all_papers = state.get("all_papers", {})
+        saved_selected_ids = set(state.get("selected_cand_ids", []))
 
         for i in self.tree_sum.get_children():
             self.tree_sum.delete(i)
         for i in self.tree_pap.get_children():
             self.tree_pap.delete(i)
         self.refresh_all_tables()
+        if saved_selected_ids:
+            new_cid_map = getattr(self, "advice_cid_map", [])
+            for i, cid in enumerate(new_cid_map):
+                if cid in saved_selected_ids:
+                    self.advice_listbox.selection_set(i)
         self.notebook.select(1)
         self.log(f"Сесію завантажено: {data.get('saved_at', 'unknown')}")
 
@@ -804,6 +815,7 @@ class MonCouncilProApp:
             else:
                 self.load_session_data(data)
                 self.restore_ai_advisor_if_loaded()
+                self._current_file_path = path
                 messagebox.showinfo("Завантаження сесії", f"Сесію успішно завантажено!")
         except Exception as e:
             self.log(f"Помилка завантаження: {str(e)}")
@@ -825,10 +837,22 @@ class MonCouncilProApp:
                 messagebox.showerror("Помилка", "Невірний PIN")
                 return
 
+        saved_keys_encrypted = ai_state.get("saved_api_keys", {})
+        if saved_keys_encrypted:
+            for provider_key, key_data in saved_keys_encrypted.items():
+                encrypted_key = key_data.get("api_key", "")
+                if encrypted_key.startswith("enc:"):
+                    pk, decrypted = decrypt_with_embedded_pin_hash(
+                        encrypted_key[4:], pin
+                    )
+                    if pk:
+                        key_data["api_key"] = decrypted
+
         data["ai_advisor"] = ai_state
 
         self.load_session_data(data)
         self.restore_ai_advisor_if_loaded()
+        self._current_file_path = path
         messagebox.showinfo("Завантаження сесії", f"Сесію успішно завантажено!")
 
     def auto_fetch_keywords(self):
@@ -1441,11 +1465,10 @@ class MonCouncilProApp:
                     for i, w in enumerate(pubs):
                         self.log_status(header, f"{i + 1}/{len(pubs)}")
                         if i > 0:
-                            time.sleep(
-                                random.uniform(30, 45)
-                                if i % 3 == 0
-                                else random.uniform(15, 25)
-                            )
+                            if self.deep_scholar_var.get():
+                                time.sleep(random.uniform(10, 20))
+                            else:
+                                time.sleep(random.uniform(2, 4))
                         try:
                             bib = w.get("bib", {})
                             t = bib.get("title", "")
@@ -1455,7 +1478,7 @@ class MonCouncilProApp:
                                 self.cutoff_year - 1
                             ):
                                 try:
-                                    time.sleep(random.uniform(8, 15))
+                                    time.sleep(random.uniform(5, 10))
                                     wf = scholarly.fill(w)
                                     ab = wf.get("bib", {}).get("abstract", "")
                                 except:

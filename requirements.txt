@@ -3,8 +3,10 @@ scholarly
 fake-useragent
 pyinstaller
 cryptography
-litellm
+litellm==1.82.0
 markdown
+pymdownx
 tkinterweb
 beautifulsoup4
 ddgs
+google-cloud-aiplatform
