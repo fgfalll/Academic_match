@@ -61,30 +61,86 @@ def fetch_url_content(url: str, max_chars: int = 5000) -> dict:
     result = {"url": url, "content": "", "error": None}
 
     try:
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-        }
-        response = requests.get(url, headers=headers, timeout=15)
-        response.raise_for_status()
-
+        import httpx
         from bs4 import BeautifulSoup
 
-        soup = BeautifulSoup(response.text, "html.parser")
-
-        for script in soup(["script", "style", "nav", "footer", "header", "aside"]):
-            script.decompose()
-
-        text = soup.get_text(separator="\n", strip=True)
-        if not text:
-            text = ""
-        else:
+        def _parse_html(html: str) -> str:
+            soup = BeautifulSoup(html, "html.parser")
+            for element in soup(
+                [
+                    "script",
+                    "style",
+                    "nav",
+                    "footer",
+                    "header",
+                    "aside",
+                    "noscript",
+                    "meta",
+                    "link",
+                ]
+            ):
+                element.decompose()
+            text = soup.get_text(separator="\n", strip=True)
+            if not text:
+                return ""
             lines = [line for line in text.split("\n") if line.strip()]
-            text = "\n".join(lines)
+            return "\n".join(lines)
+
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.5",
+            "Accept-Encoding": "gzip, deflate",
+            "Connection": "keep-alive",
+        }
+
+        timeout = httpx.Timeout(connect=8.0, read=15.0, write=8.0, pool=10.0)
+        transport = httpx.HTTPTransport(retries=2)
+
+        def _try_fetch(client: httpx.Client, url: str) -> httpx.Response:
+            return client.get(url, headers=headers)
+
+        try:
+            with httpx.Client(
+                timeout=timeout, transport=transport, follow_redirects=True
+            ) as client:
+                response = _try_fetch(client, url)
+                response.raise_for_status()
+                text = _parse_html(response.text)
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 403:
+                alt_headers = {
+                    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
+                    "Accept": "text/html,*/*",
+                    "Accept-Language": "en-US,en;q=0.9",
+                }
+                with httpx.Client(
+                    timeout=timeout, transport=transport, follow_redirects=True
+                ) as client:
+                    response = client.get(url, headers=alt_headers)
+                    response.raise_for_status()
+                    text = _parse_html(response.text)
+            else:
+                raise
+        except httpx.RequestError:
+            with httpx.Client(
+                timeout=timeout, follow_redirects=True, verify=False
+            ) as client:
+                response = client.get(url, headers=headers)
+                response.raise_for_status()
+                text = _parse_html(response.text)
 
         if text and len(text) > max_chars:
             text = text[:max_chars] + f"\n... [Truncated {len(text) - max_chars} chars]"
 
         result["content"] = text
+
+    except httpx.TimeoutException:
+        result["error"] = "Timeout fetching URL (network or server too slow)"
+    except httpx.HTTPStatusError as e:
+        result["error"] = f"HTTP {e.response.status_code}: {str(e)[:100]}"
+    except httpx.RequestError as e:
+        result["error"] = f"Request failed: {str(e)[:100]}"
     except Exception as e:
         result["error"] = str(e)
 
@@ -171,9 +227,90 @@ def search_concepts(query: str) -> dict:
 def search_authors(query: str, field: str = None) -> dict:
     params = {
         "search": query,
-        "select": "id,display_name,orcid,cited_by_count,h-index,works_count,topics",
+        "select": "id,display_name,orcid,cited_by_count,works_count,topics",
     }
     return _openalex_get("authors", params)
+
+
+def openalex_raw_search(
+    endpoint: str,
+    search: str = None,
+    filter: str = None,
+    sort: str = None,
+    select: str = None,
+    per_page: int = 25,
+    page: int = None,
+    cursor: str = None,
+    group_by: str = None,
+) -> dict:
+    params = {}
+    if search:
+        params["search"] = search
+    if filter:
+        params["filter"] = filter
+    if sort:
+        params["sort"] = sort
+    if select:
+        params["select"] = select
+    if page:
+        params["page"] = page
+    if cursor:
+        params["cursor"] = cursor
+    if group_by:
+        params["group_by"] = group_by
+    return _openalex_get(endpoint, params)
+
+
+def search_sources(query: str, year: int = None) -> dict:
+    select = "id,display_name,host_organization,type,cited_by_count,works_count"
+    params = {"search": query, "select": select}
+    if year:
+        params["filter"] = f"publication_year:{year}"
+    return _openalex_get("sources", params)
+
+
+def search_institutions(query: str) -> dict:
+    params = {
+        "search": query,
+        "select": "id,display_name,country_code,type,works_count,cited_by_count",
+    }
+    return _openalex_get("institutions", params)
+
+
+def search_topics(query: str) -> dict:
+    params = {
+        "search": query,
+        "select": "id,display_name,description",
+    }
+    return _openalex_get("topics", params)
+
+
+def search_keywords(query: str) -> dict:
+    params = {"search": query, "select": "id,display_name"}
+    return _openalex_get("keywords", params)
+
+
+def search_publishers(query: str) -> dict:
+    params = {"search": query, "select": "id,display_name,works_count"}
+    return _openalex_get("publishers", params)
+
+
+def search_funders(query: str) -> dict:
+    params = {
+        "search": query,
+        "select": "id,display_name,works_count",
+    }
+    return _openalex_get("funders", params)
+
+
+def search_awards(query: str) -> dict:
+    params = {"search": query, "select": "id,display_name,funder,amount"}
+    return _openalex_get("awards", params)
+
+
+def search_countries(query: str) -> dict:
+    params = {"search": query, "select": "id,display_name"}
+    return _openalex_get("countries", params)
 
 
 SCHOLAR_DELAY_BASIC = 3
@@ -470,8 +607,8 @@ def format_concepts_result(data: dict) -> str:
         cid = c.get("id", "N/A")
         name = c.get("display_name", "N/A")
         level = c.get("level", "N/A")
-        desc = c.get("description", "")
-        desc_preview = desc[:100] + "..." if len(desc) > 100 else desc if desc else ""
+        desc = c.get("description", "") or ""
+        desc_preview = (desc[:100] + "...") if len(desc) > 100 else desc
         lines.append(f"- {name} [{cid}] (level={level})")
         if desc_preview:
             lines.append(f"  {desc_preview}")
@@ -490,7 +627,6 @@ def format_authors_result(data: dict) -> str:
         name = a.get("display_name", "N/A")
         orcid = a.get("orcid", "N/A")
         cited = a.get("cited_by_count", 0)
-        hindex = a.get("h-index", "N/A")
         works = a.get("works_count", 0)
         topics = []
         for t in a.get("topics", [])[:5]:
@@ -499,10 +635,152 @@ def format_authors_result(data: dict) -> str:
                 topics.append(topic_name)
         topic_str = ", ".join(topics) if topics else "None"
         lines.append(f"- {name} [{aid}]")
-        lines.append(f"  Citations: {cited} | h-index: {hindex} | Works: {works}")
+        lines.append(f"  Citations: {cited} | Works: {works}")
         if orcid and orcid != "N/A":
             lines.append(f"  ORCID: {orcid}")
         lines.append(f"  Topics: {topic_str}")
+    return "\n".join(lines)
+
+
+def format_sources_result(data: dict) -> str:
+    if data.get("error"):
+        return f"OpenAlex error: {data['error']}"
+    results = data.get("results", [])[:OPENALEX_PER_PAGE]
+    if not results:
+        return "No sources found."
+    lines = ["=== OpenAlex Sources ==="]
+    for s in results:
+        sid = s.get("id", "N/A")
+        name = s.get("display_name", "N/A")
+        stype = s.get("type", "N/A")
+        org = s.get("host_organization", "")
+        cited = s.get("cited_by_count", 0)
+        works = s.get("works_count", 0)
+        lines.append(f"- {name} [{sid}]")
+        lines.append(
+            f"  Type: {stype} | Org: {org} | Citations: {cited} | Works: {works}"
+        )
+    return "\n".join(lines)
+
+
+def format_institutions_result(data: dict) -> str:
+    if data.get("error"):
+        return f"OpenAlex error: {data['error']}"
+    results = data.get("results", [])[:OPENALEX_PER_PAGE]
+    if not results:
+        return "No institutions found."
+    lines = ["=== OpenAlex Institutions ==="]
+    for i in results:
+        iid = i.get("id", "N/A")
+        name = i.get("display_name", "N/A")
+        itype = i.get("type", "N/A")
+        country = i.get("country_code", "N/A")
+        cited = i.get("cited_by_count", 0)
+        works = i.get("works_count", 0)
+        lines.append(f"- {name} [{iid}]")
+        lines.append(
+            f"  Type: {itype} | Country: {country} | Citations: {cited} | Works: {works}"
+        )
+    return "\n".join(lines)
+
+
+def format_topics_result(data: dict) -> str:
+    if data.get("error"):
+        return f"OpenAlex error: {data['error']}"
+    results = data.get("results", [])[:OPENALEX_PER_PAGE]
+    if not results:
+        return "No topics found."
+    lines = ["=== OpenAlex Topics ==="]
+    for t in results:
+        tid = t.get("id", "N/A")
+        name = t.get("display_name", "N/A")
+        level = t.get("level", "N/A")
+        desc = t.get("description", "") or ""
+        desc_preview = (desc[:100] + "...") if len(desc) > 100 else desc
+        lines.append(f"- {name} [{tid}] (level={level})")
+        if desc_preview:
+            lines.append(f"  {desc_preview}")
+    return "\n".join(lines)
+
+
+def format_keywords_result(data: dict) -> str:
+    if data.get("error"):
+        return f"OpenAlex error: {data['error']}"
+    results = data.get("results", [])[:OPENALEX_PER_PAGE]
+    if not results:
+        return "No keywords found."
+    lines = ["=== OpenAlex Keywords ==="]
+    for k in results:
+        kid = k.get("id", "N/A")
+        name = k.get("display_name", "N/A")
+        level = k.get("level", "N/A")
+        works = k.get("works_count", 0)
+        lines.append(f"- {name} [{kid}] (level={level}, works={works})")
+    return "\n".join(lines)
+
+
+def format_publishers_result(data: dict) -> str:
+    if data.get("error"):
+        return f"OpenAlex error: {data['error']}"
+    results = data.get("results", [])[:OPENALEX_PER_PAGE]
+    if not results:
+        return "No publishers found."
+    lines = ["=== OpenAlex Publishers ==="]
+    for p in results:
+        pid = p.get("id", "N/A")
+        name = p.get("display_name", "N/A")
+        works = p.get("works_count", 0)
+        lines.append(f"- {name} [{pid}] (works={works})")
+    return "\n".join(lines)
+
+
+def format_funders_result(data: dict) -> str:
+    if data.get("error"):
+        return f"OpenAlex error: {data['error']}"
+    results = data.get("results", [])[:OPENALEX_PER_PAGE]
+    if not results:
+        return "No funders found."
+    lines = ["=== OpenAlex Funders ==="]
+    for f in results:
+        fid = f.get("id", "N/A")
+        name = f.get("display_name", "N/A")
+        ftype = f.get("type", "N/A")
+        cited = f.get("cited_by_count", 0)
+        works = f.get("works_count", 0)
+        lines.append(f"- {name} [{fid}]")
+        lines.append(f"  Type: {ftype} | Citations: {cited} | Works: {works}")
+    return "\n".join(lines)
+
+
+def format_awards_result(data: dict) -> str:
+    if data.get("error"):
+        return f"OpenAlex error: {data['error']}"
+    results = data.get("results", [])[:OPENALEX_PER_PAGE]
+    if not results:
+        return "No awards found."
+    lines = ["=== OpenAlex Awards ==="]
+    for a in results:
+        aid = a.get("id", "N/A")
+        name = a.get("display_name", "N/A")
+        funder = a.get("funder", "N/A")
+        amount = a.get("amount", "N/A")
+        lines.append(f"- {name} [{aid}]")
+        lines.append(f"  Funder: {funder} | Amount: {amount}")
+    return "\n".join(lines)
+
+
+def format_countries_result(data: dict) -> str:
+    if data.get("error"):
+        return f"OpenAlex error: {data['error']}"
+    results = data.get("results", [])[:OPENALEX_PER_PAGE]
+    if not results:
+        return "No countries found."
+    lines = ["=== OpenAlex Countries ==="]
+    for c in results:
+        cid = c.get("id", "N/A")
+        name = c.get("display_name", "N/A")
+        code = c.get("code", "N/A")
+        lines.append(f"- {name} [{cid}] (code={code})")
     return "\n".join(lines)
 
 
@@ -1932,12 +2210,33 @@ SYSTEM_PROMPT = """Ти - науковий консультант для ате�
 - Якщо use scholar_search - спочатку спробуй `action_type="author_id"` (швидше)
 - НЕ роби висновків про експертизу лише за назвами статей!
 
-КРОК 4: WEB ПОШУК (ТІЛЬКИ ЯКЩО НЕОБХІДНО)
+КРОК 4: OPENALEX ПОШУК (ДОДАТКОВЕ ДЖЕРЕЛО)
+- Використовуй `openalex_search` для:
+  * Перевірки публікацій кандидата за DOI або назвою
+  * Отримання abstract (якщо вони відсутні у внутрішній базі)
+  * Пошуку інформації про журнали, інституції, концепти
+  * ВерифіКАЦІЇ даних про автора (works_count, cited_by_count, topics)
+- Підтримує 11 типів сутностей: works, authors, sources, institutions, topics, keywords, publishers, funders, awards, countries, concepts
+- Можна фільтрувати за роком: `year=2024`, сортувати: `sort=cited_by_count`
+- ДОДАВАННЯ ДО ЗАПИТУ: `filter=is_oa:true` для open access публікацій
+
+КРОК 5: WEB ПОШУК (ТІЛЬКИ ЯКЩО НЕОБХІДНО)
 - Використовуй `web_search` для перевірки:
   - Journal ranking (Scopus quartile)
   - Статус фахового видання України (категорія А/Б)
   - Чи не "хижацький" журнал
 - ПІСЛЯ `web_search` ЯКЩО знайдено релевантний URL → виклич `fetch_page`
+
+КРОК 6: АНАЛІЗ ЯКОСТІ ДАНИХ
+ПІСЛЯ отримання даних від усіх джерел, ПОВИНЕН оцінити їх повноту:
+- ЯКЩО кандидат має ДЕКІЛЬКА публікацій з повними abstract → це достатньо для аналізу
+- ЯКЩО кандидат має публікації ТІЛЬКИ з Google Scholar БЕЗ abstract → відзнач у відповіді:
+  "⚠️ Увага: публікації кандидата доступні лише за назвами з Google Scholar. 
+   Абстракти відсутні, тому релевантність публікацій до теми дисертації 
+   неможливо перевірити автоматично. Необхідна ручна експертна оцінка."
+- ЯКЩО кандидат має лише 1-2 публікації → відзнач обмеженість даних
+- ЯКЩО кандидат має публікації без DOI або без журнальної інформації → відзнач це
+- ЯКЩО ДАНІ СУПЕРЕЧАТЬ один одному (наприклад, різні імена автора) → вкажи на неоднозначність
 
 ЗАБОРОНЕНО:
 - Робити висновки на основі лише сніпетів з web_search
@@ -1945,6 +2244,7 @@ SYSTEM_PROMPT = """Ти - науковий консультант для ате�
 - Робити фінальну рекомендацію без повних даних про публікації
 - Сліпо покладатися на автоматичний score (0-5) — він лише орієнтир
 - Приймати автоматичний verdict як остаточний — ти ПОВИНЕН проаналізувати сам
+- Робити остаточні висновки про релевантність публікацій, якщо доступні лише їх назви
 
 ТИ ПОВИНЕН:
 - Читати abstract публікацій і робити ВЛАСНІ висновки про релевантність
@@ -2790,19 +3090,47 @@ class AIAdvisorApp:
                 "type": "function",
                 "function": {
                     "name": "openalex_search",
-                    "description": "Шукати публікації, концепти або авторів в OpenAlex",
+                    "description": "Шукати публікації, концепти, авторів, джерела, інституції та інші сутності в OpenAlex",
                     "strict": False,
                     "parameters": {
                         "type": "object",
                         "properties": {
                             "entity_type": {
                                 "type": "string",
-                                "enum": ["works", "concepts", "authors"],
-                                "description": "Тип сутності для пошуку",
+                                "enum": [
+                                    "works",
+                                    "authors",
+                                    "sources",
+                                    "institutions",
+                                    "topics",
+                                    "keywords",
+                                    "publishers",
+                                    "funders",
+                                    "awards",
+                                    "countries",
+                                    "concepts",
+                                ],
+                                "description": "Тип сутності для пошуку. works=статті/книги, authors=дослідники, sources=журнали/конференції, institutions=університети, topics=дослідницькі області, keywords=ключові слова, publishers=видавці, funders=фонди, awards=гранти, countries= країни, concepts=концепти",
                             },
                             "query": {
                                 "type": "string",
                                 "description": "Пошуковий запит",
+                            },
+                            "year": {
+                                "type": "integer",
+                                "description": "Рік публікації для фільтрації (наприклад, 2024)",
+                            },
+                            "sort": {
+                                "type": "string",
+                                "description": "Сортування: cited_by_count, publication_year, relevance",
+                            },
+                            "per_page": {
+                                "type": "integer",
+                                "description": "Кількість результатів (1-100, за замовчуванням 25)",
+                            },
+                            "filter": {
+                                "type": "string",
+                                "description": "Додаткові фільтри у форматі OpenAlex (наприклад, is_oa:true для open access)",
                             },
                         },
                         "required": ["entity_type", "query"],
@@ -2910,9 +3238,13 @@ class AIAdvisorApp:
             elif tool_name == "openalex_search":
                 entity_type = arguments.get("entity_type")
                 query = arguments.get("query")
+                year = arguments.get("year")
+                sort = arguments.get("sort")
+                per_page = arguments.get("per_page")
+                filter_str = arguments.get("filter")
 
                 if entity_type == "works":
-                    res = search_works(query)
+                    res = search_works(query, year=year, sort=sort)
                     return format_works_result(res)
                 elif entity_type == "concepts":
                     res = search_concepts(query)
@@ -2920,6 +3252,32 @@ class AIAdvisorApp:
                 elif entity_type == "authors":
                     res = search_authors(query)
                     return format_authors_result(res)
+                elif entity_type == "sources":
+                    res = search_sources(query, year=year)
+                    return format_sources_result(res)
+                elif entity_type == "institutions":
+                    res = search_institutions(query)
+                    return format_institutions_result(res)
+                elif entity_type == "topics":
+                    res = search_topics(query)
+                    return format_topics_result(res)
+                elif entity_type == "keywords":
+                    res = search_keywords(query)
+                    return format_keywords_result(res)
+                elif entity_type == "publishers":
+                    res = search_publishers(query)
+                    return format_publishers_result(res)
+                elif entity_type == "funders":
+                    res = search_funders(query)
+                    return format_funders_result(res)
+                elif entity_type == "awards":
+                    res = search_awards(query)
+                    return format_awards_result(res)
+                elif entity_type == "countries":
+                    res = search_countries(query)
+                    return format_countries_result(res)
+                else:
+                    return f"Unknown entity_type: {entity_type}. Supported: works, authors, sources, institutions, topics, keywords, publishers, funders, awards, countries, concepts"
 
             elif tool_name == "manage_banned_keywords":
                 action = arguments.get("action")
