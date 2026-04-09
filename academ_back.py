@@ -259,10 +259,10 @@ class MonCouncilProApp:
         self.update_keyword_preview()
 
     def create_widgets(self):
-        menubar = tk.Menu(self.root)
-        self.root.config(menu=menubar)
-        file_menu = tk.Menu(menubar, tearoff=0)
-        menubar.add_cascade(label="Файл", menu=file_menu)
+        self.menubar = tk.Menu(self.root)
+        self.root.config(menu=self.menubar)
+        file_menu = tk.Menu(self.menubar, tearoff=0)
+        self.menubar.add_cascade(label="Файл", menu=file_menu)
         file_menu.add_command(
             label="Зберегти сесію", command=self.save_session, accelerator="Ctrl+S"
         )
@@ -276,6 +276,7 @@ class MonCouncilProApp:
         )
         file_menu.add_separator()
         file_menu.add_command(label="Вихід", command=self.root.quit)
+
         self.root.bind("<Control-S>", lambda e: self.save_session())
         self.root.bind("<Control-O>", lambda e: self.load_session())
 
@@ -357,6 +358,23 @@ class MonCouncilProApp:
             text="Глибокий аналіз Scholar (повільніше)",
             variable=self.deep_scholar_var,
         ).grid(row=2, column=3, sticky="w")
+        self.journal_only_var = tk.BooleanVar(value=False)
+
+        settings_menu = tk.Menu(self.menubar, tearoff=0)
+        self.menubar.add_cascade(label="Налаштування", menu=settings_menu)
+        settings_menu.add_checkbutton(
+            label="Тільки журнальні статті (без конференцій)",
+            variable=self.journal_only_var,
+        )
+        settings_menu.add_separator()
+        settings_menu.add_checkbutton(
+            label="Глибокий аналіз Scholar",
+            variable=self.deep_scholar_var,
+        )
+        settings_menu.add_checkbutton(
+            label="Аналізувати анотації та співавторів (ORCID/OpenAlex)",
+            variable=self.deep_analysis_var,
+        )
 
         wa = ttk.Frame(self.tab_main)
         wa.pack(fill="both", expand=True, padx=5, pady=2)
@@ -380,6 +398,7 @@ class MonCouncilProApp:
         self.keyword_text.bind("<KeyRelease>", self.update_keyword_preview)
         self.keyword_text.bind("<Button-3>", self.show_text_context_menu)
         self.candidates_text.bind("<Button-3>", self.show_text_context_menu)
+        self.candidates_text.bind("<<Paste>>", self._on_candidates_paste)
         self.parsed_kw_label = ttk.Label(
             kwf, text="", foreground="#0056b3", wraplength=400
         )
@@ -491,6 +510,7 @@ class MonCouncilProApp:
         self.tree_pap.pack(fill="both", expand=True)
         self.tree_pap.bind("<<TreeviewSelect>>", self.on_paper_select)
         self.tree_pap.bind("<Double-Button-1>", lambda e: self.open_paper_details())
+        self.tree_pap.bind("<Control-v>", self._on_papers_paste)
 
         self.pm = tk.Menu(self.root, tearoff=0)
         self.tree_pap.bind("<Button-3>", self.show_paper_context_menu)
@@ -498,6 +518,8 @@ class MonCouncilProApp:
 
         self.tree_pap.tag_configure("conflict", background="#f8d7da")
         self.tree_pap.tag_configure("coauthor", background="#fff3cd")
+
+        self.tab_edit.bind("<Control-v>", self._on_papers_paste)
 
     def build_advice_tab(self):
         main_frame = ttk.Frame(self.tab_advice)
@@ -969,7 +991,7 @@ class MonCouncilProApp:
     def _fetch_kw_thread(self, oid):
         try:
             r = requests.get(
-                f"https://api.openalex.org/works?filter=author.orcid:https://orcid.org/{oid}&per-page=50",
+                f"https://api.openalex.org/works?filter=author.orcid:https://orcid.org/{oid}{self._openalex_filter()}&per-page=50",
                 timeout=30,
             )
             if r.status_code == 200:
@@ -1044,7 +1066,7 @@ class MonCouncilProApp:
                 time.sleep(5)
                 try:
                     r = requests.get(
-                        f"https://api.openalex.org/works?filter=author.orcid:https://orcid.org/{oid}&per-page=50",
+                        f"https://api.openalex.org/works?filter=author.orcid:https://orcid.org/{oid}{self._openalex_filter()}&per-page=50",
                         timeout=30,
                     )
                     if r.status_code == 200:
@@ -1236,6 +1258,244 @@ class MonCouncilProApp:
             elif len(p_clean) > 5 and not orcid:
                 gs_id = p_clean
         return orcid, gs_id
+
+    def _strip_url_from_line(self, line):
+        """Extract ORCID or Google Scholar ID from a line (handles URLs or plain IDs)."""
+        line = line.strip()
+        if not line:
+            return line
+        if "orcid.org" in line:
+            orcid_m = re.search(r"/(\d{4}-\d{4}-\d{4}-\d{3}[\dX])$", line)
+            if orcid_m:
+                return orcid_m.group(1)
+            orcid_m = re.search(r"[?&]orcid=(\d{4}-\d{4}-\d{4}-\d{3}[\dX])", line)
+            if orcid_m:
+                return orcid_m.group(1)
+        elif "scholar.google" in line:
+            gs_m = re.search(r"user=([\w-]{12})", line)
+            if gs_m:
+                return gs_m.group(1)
+        return line
+
+    def _on_candidates_paste(self, event):
+        """Handle paste event - strip URLs and normalize to one ID pair per line."""
+        try:
+            clipboard = self.root.clipboard_get()
+        except tk.TclError:
+            return "break"
+
+        lines = clipboard.split("\n")
+        cleaned_lines = [self._strip_url_from_line(line) for line in lines]
+        cleaned_text = "\n".join(cleaned_lines)
+
+        if cleaned_text != clipboard:
+            if event.widget.tag_ranges("sel"):
+                event.widget.delete("sel.first", "sel.last")
+            event.widget.insert("insert", cleaned_text)
+            return "break"
+        return None
+
+    def _on_papers_paste(self, event):
+        """Handle paste event in papers table - check for OpenAlex URL and open manual paper dialog."""
+        try:
+            clipboard = self.root.clipboard_get()
+        except tk.TclError:
+            return None
+
+        if "api.openalex.org" in clipboard.lower():
+            if re.search(r"api\.openalex\.org/(w\d+)", clipboard):
+                cand_for_paper = None
+                sel = self.tree_pap.selection()
+                if sel:
+                    item = self.tree_pap.item(sel[0])
+                    if item["values"]:
+                        paper_uuid = item["values"][0]
+                        for cid, cdata in self.all_candidates.items():
+                            if paper_uuid in cdata.get("papers_uuids", []):
+                                cand_for_paper = cid
+                                break
+                if not cand_for_paper and self.current_cand_filter:
+                    cand_for_paper = self.current_cand_filter
+                self.open_add_manual_paper(
+                    prefill_url=clipboard.strip(), preselect_cand=cand_for_paper
+                )
+                return "break"
+        return None
+
+    def _import_paper_from_openalex(self, url):
+        """Fetch paper data from OpenAlex URL. Returns dict or None."""
+        work_m = re.search(r"api\.openalex\.org/(w\d+)", url)
+        if not work_m:
+            return None
+        work_id = work_m.group(1)
+        headers = {"User-Agent": "AcademicMatch/1.0 (mailto:mon-phd-check@example.com)"}
+        try:
+            r = requests.get(
+                f"https://api.openalex.org/works/{work_id}", headers=headers, timeout=15
+            )
+            if r.status_code != 200:
+                return None
+            ws = r.json()
+            title = ws.get("title") or ""
+            year = ws.get("publication_year") or 0
+            pl = ws.get("primary_location") or {}
+            journal = (pl.get("source") or {}).get("display_name", "-") or "-"
+            doi = ws.get("doi") or ""
+            concepts = [c.get("display_name", "") for c in ws.get("topics", [])]
+            author_keywords = [
+                kw.get("display_name", "") for kw in ws.get("keywords", [])
+            ]
+            abstract = decode_openalex_abstract(ws.get("abstract_inverted_index"))
+            authors_full = [
+                a.get("author", {}).get("display_name", "Невідомо")
+                for a in ws.get("authorships", [])
+            ]
+            return {
+                "title": title,
+                "year": year,
+                "journal": journal,
+                "url": doi,
+                "concepts": concepts,
+                "author_keywords": author_keywords,
+                "abstract": abstract,
+                "authors_full": authors_full,
+                "source": "Manual (OpenAlex)",
+            }
+        except:
+            return None
+
+    def _openalex_filter(self):
+        """Return OpenAlex filter string based on settings."""
+        if self.journal_only_var.get():
+            return ",primary_location.source.type:journal"
+        return ""
+
+    def _enrich_papers_with_openalex(self, merged_local):
+        """Enrich all papers in merged_local with OpenAlex data (abstract, concepts, keywords, journal, authors)."""
+        if not merged_local:
+            return
+
+        papers_needing_enrichment = [
+            p
+            for p in merged_local.values()
+            if not p.get("abstract")
+            or not p.get("concepts")
+            or not p.get("authors_full")
+        ]
+        if not papers_needing_enrichment:
+            return
+
+        oa_h = {"User-Agent": "AcademicMatch/1.0 (mailto:mon-phd-check@example.com)"}
+        enriched_total = 0
+
+        doi_list = [p["doi"] for p in papers_needing_enrichment if p.get("doi")]
+        if doi_list:
+            oa_works = {}
+            for i in range(0, len(doi_list), 50):
+                batch = doi_list[i : i + 50]
+                doi_filter = "|".join(batch)
+                try:
+                    r_doi = requests.get(
+                        f"https://api.openalex.org/works?filter=doi:{doi_filter}&per-page=200",
+                        headers=oa_h,
+                        timeout=30,
+                    )
+                    if r_doi.status_code == 200:
+                        for w in r_doi.json().get("results", []):
+                            w_doi = (
+                                w.get("doi", "").lower().replace("https://doi.org/", "")
+                            )
+                            oa_works[w_doi] = w
+                except:
+                    pass
+
+            for p in papers_needing_enrichment:
+                p_doi = p.get("doi", "").lower()
+                if p_doi and p_doi in oa_works:
+                    ws = oa_works[p_doi]
+                    pl = ws.get("primary_location") or {}
+                    journal = (pl.get("source") or {}).get("display_name", "-") or "-"
+                    if not p.get("abstract"):
+                        p["abstract"] = decode_openalex_abstract(
+                            ws.get("abstract_inverted_index")
+                        )
+                    if not p.get("concepts"):
+                        p["concepts"] = [
+                            c.get("display_name", "") for c in ws.get("topics", [])
+                        ]
+                    if not p.get("author_keywords"):
+                        p["author_keywords"] = [
+                            kw.get("display_name", "") for kw in ws.get("keywords", [])
+                        ]
+                    if not p.get("journal") or p.get("journal", "-") == "-":
+                        p["journal"] = journal
+                    if not p.get("authors_full"):
+                        p["authors_full"] = [
+                            a.get("author", {}).get("display_name", "Невідомо")
+                            for a in ws.get("authorships", [])
+                        ]
+                    enriched_total += 1
+
+        titles_without_doi = [
+            p["title"]
+            for p in papers_needing_enrichment
+            if not p.get("doi") and p.get("title")
+        ]
+        for title in titles_without_doi[:20]:
+            try:
+                title_encoded = requests.utils.quote(title[:200])
+                r_search = requests.get(
+                    f"https://api.openalex.org/works?search={title_encoded}&per-page=5",
+                    headers=oa_h,
+                    timeout=15,
+                )
+                if r_search.status_code == 200:
+                    results = r_search.json().get("results", [])
+                    for ws in results:
+                        ws_title = ws.get("title", "")
+                        if ws_title.lower() == title.lower():
+                            pl = ws.get("primary_location") or {}
+                            journal = (pl.get("source") or {}).get(
+                                "display_name", "-"
+                            ) or "-"
+                            for p in papers_needing_enrichment:
+                                if p.get(
+                                    "title", ""
+                                ).lower() == title.lower() and not p.get("doi"):
+                                    if not p.get("abstract"):
+                                        p["abstract"] = decode_openalex_abstract(
+                                            ws.get("abstract_inverted_index")
+                                        )
+                                    if not p.get("concepts"):
+                                        p["concepts"] = [
+                                            c.get("display_name", "")
+                                            for c in ws.get("topics", [])
+                                        ]
+                                    if not p.get("author_keywords"):
+                                        p["author_keywords"] = [
+                                            kw.get("display_name", "")
+                                            for kw in ws.get("keywords", [])
+                                        ]
+                                    if (
+                                        not p.get("journal")
+                                        or p.get("journal", "-") == "-"
+                                    ):
+                                        p["journal"] = journal
+                                    if not p.get("authors_full"):
+                                        p["authors_full"] = [
+                                            a.get("author", {}).get(
+                                                "display_name", "Невідомо"
+                                            )
+                                            for a in ws.get("authorships", [])
+                                        ]
+                                    enriched_total += 1
+                                    break
+                            break
+            except:
+                pass
+
+        if enriched_total > 0:
+            self.log(f"   - Збагачено {enriched_total} робіт через OpenAlex")
 
     def _find_existing_candidate(self, orcid, gs_id):
         """Find existing candidate by ORCID or GS ID. Returns cand_id or None."""
@@ -1457,8 +1717,9 @@ class MonCouncilProApp:
                 new_lines.append(line)
 
         if has_existing and not new_lines:
-            self.log("=== ВСІ ДАНІ ВЖЕ ЗАВАНТАЖЕНІ ===")
-            self.log("Спробуйте інший список кандидатів або додайте нові ID.")
+            self.log("=== ОНОВЛЕННЯ КЛЮЧОВИХ СЛІВ ===")
+            self.log("Перерахунок балів з новими ключовими словами...")
+            self.recalculate_all_scores()
             self.run_btn.config(state="normal")
             return
         elif has_existing:
@@ -1545,6 +1806,7 @@ class MonCouncilProApp:
                 conflict = self.all_candidates[cand_id].get("conflict", "Немає")
                 merged_local = {}
                 doi_map = {}
+                orcid_works_count = 0
                 self.log(
                     f"[{cand_id}] ПРОДОВЖЕННЯ (вже має {len(self.all_candidates[cand_id]['papers_uuids'])} робіт)"
                 )
@@ -1573,6 +1835,7 @@ class MonCouncilProApp:
                 doi_map = {}
                 a_name = "Невідомо"
                 conflict = "Немає"
+                orcid_works_count = 0
 
             if super_id and (super_id == orcid.lower() or super_id == gs_id.lower()):
                 conflict = "Керівник"
@@ -1587,6 +1850,28 @@ class MonCouncilProApp:
             if orcid and "ORCID" not in sources_fetched:
                 self.log(f"[{cand_id}] Отримання робіт з ORCID...")
                 try:
+                    if a_name == "Невідомо":
+                        try:
+                            orcid_detail = requests.get(
+                                f"https://pub.orcid.org/v3.0/{orcid}",
+                                headers={"Accept": "application/json"},
+                                timeout=10,
+                            )
+                            if orcid_detail.status_code == 200:
+                                person = orcid_detail.json().get("person", {})
+                                name_data = person.get("name", {})
+                                given = name_data.get("given-names", {}).get(
+                                    "value", ""
+                                )
+                                family = name_data.get("family-name", {}).get(
+                                    "value", ""
+                                )
+                                if given or family:
+                                    a_name = f"{given} {family}".strip()
+                                    self.log(f"   - Ім'я з ORCID: {a_name}")
+                        except:
+                            pass
+
                     r = requests.get(
                         f"https://pub.orcid.org/v3.0/{orcid}/works",
                         headers={"Accept": "application/json"},
@@ -1621,6 +1906,15 @@ class MonCouncilProApp:
                                             )
                                             break
 
+                                work_type = s.get("type", "")
+                                if self.journal_only_var.get() and work_type not in (
+                                    "journal-article",
+                                    "journal-review-article",
+                                    "letter",
+                                    "brief-report",
+                                ):
+                                    continue
+
                                 k = re.sub(r"\W+", "", t.lower())
                                 p_data = {
                                     "title": t,
@@ -1638,6 +1932,7 @@ class MonCouncilProApp:
                                     else (f"https://doi.org/{doi}" if doi else ""),
                                 }
                                 merged_local[k] = p_data
+                                orcid_works_count += 1
                                 if doi:
                                     doi_map[doi] = k
                     else:
@@ -1651,38 +1946,187 @@ class MonCouncilProApp:
                 oa_h = {
                     "User-Agent": "AcademicMatch/1.0 (mailto:mon-phd-check@example.com)"
                 }
+                oa_works_count = 0
                 try:
                     an_fetch = get_author_info_openalex(orcid)
                     if an_fetch != "Невідомо":
                         a_name = an_fetch
 
                     r_l = requests.get(
-                        f"https://api.openalex.org/works?filter=author.orcid:https://orcid.org/{orcid}&per-page=200",
+                        f"https://api.openalex.org/works?filter=author.orcid:https://orcid.org/{orcid}{self._openalex_filter()}&per-page=200",
                         headers=oa_h,
                         timeout=15,
                     )
                     if r_l.status_code == 200:
                         works = r_l.json().get("results", [])
-                        if not works:
-                            self.log(f"   - В OpenAlex немає робіт для цього ORCID")
-                        else:
+                        oa_works_count = len(works)
+                        if works:
                             self.log(f"   - Знайдено {len(works)} робіт в OpenAlex")
-                            for i, ws in enumerate(works):
-                                w_title = ws.get("title") or ""
-                                w_doi = (
-                                    (ws.get("doi") or "")
-                                    .lower()
-                                    .replace("https://doi.org/", "")
+                            if a_name == "Невідомо":
+                                for ws in works:
+                                    for auth in ws.get("authorships", []):
+                                        auth_name = auth.get("author", {}).get(
+                                            "display_name", ""
+                                        )
+                                        if auth_name and auth_name != "Невідомо":
+                                            a_name = auth_name
+                                            self.log(f"   - Ім'я з роботи: {a_name}")
+                                            break
+                                    if a_name != "Невідомо":
+                                        break
+                        if a_name != "Невідомо":
+                            self.log(
+                                f"   - Шукаю додаткові роботи за іменем в OpenAlex..."
+                            )
+                            try:
+                                name_encoded = requests.utils.quote(a_name)
+                                r_author = requests.get(
+                                    f"https://api.openalex.org/authors?search={name_encoded}",
+                                    headers=oa_h,
+                                    timeout=15,
                                 )
-                                k_oa = re.sub(r"\W+", "", w_title.lower())
+                                if r_author.status_code == 200:
+                                    authors = r_author.json().get("results", [])
+                                    matching_authors = []
+                                    target_lower = a_name.lower()
+                                    for auth_result in authors:
+                                        auth_name = auth_result.get("display_name", "")
+                                        auth_name_lower = auth_name.lower()
+                                        alternatives = auth_result.get(
+                                            "display_name_alternatives", []
+                                        )
+                                        if (
+                                            auth_name_lower == target_lower
+                                            or target_lower
+                                            in [a.lower() for a in alternatives]
+                                        ):
+                                            matching_authors.append(auth_result)
+                                    for ma in matching_authors:
+                                        oa_id = ma.get("id", "").replace(
+                                            "https://openalex.org/", ""
+                                        )
+                                        self.log(
+                                            f"     Автор: {ma.get('display_name')} ({ma.get('works_count', 0)} робіт)"
+                                        )
+                                        r_author_works = requests.get(
+                                            f"https://api.openalex.org/works?filter=author.id:{oa_id}{self._openalex_filter()}&per-page=200",
+                                            headers=oa_h,
+                                            timeout=15,
+                                        )
+                                        if r_author_works.status_code == 200:
+                                            wks = r_author_works.json().get(
+                                                "results", []
+                                            )
+                                            for w in wks:
+                                                w_title = w.get("title") or ""
+                                                if not w_title:
+                                                    continue
+                                                w_doi = (
+                                                    (w.get("doi") or "")
+                                                    .lower()
+                                                    .replace("https://doi.org/", "")
+                                                )
+                                                k_oa = re.sub(
+                                                    r"\W+", "", w_title.lower()
+                                                )
+                                                if k_oa not in merged_local:
+                                                    pl = w.get("primary_location") or {}
+                                                    journal = (
+                                                        pl.get("source") or {}
+                                                    ).get("display_name", "-") or "-"
+                                                    merged_local[k_oa] = {
+                                                        "title": w_title,
+                                                        "year": w.get(
+                                                            "publication_year", 0
+                                                        ),
+                                                        "doi": w_doi,
+                                                        "source": "OpenAlex",
+                                                        "manual_keywords": "",
+                                                        "abstract": decode_openalex_abstract(
+                                                            w.get(
+                                                                "abstract_inverted_index"
+                                                            )
+                                                        ),
+                                                        "authors_full": [
+                                                            a.get("author", {}).get(
+                                                                "display_name",
+                                                                "Невідомо",
+                                                            )
+                                                            for a in w.get(
+                                                                "authorships", []
+                                                            )
+                                                        ],
+                                                        "concepts": [
+                                                            c.get("display_name", "")
+                                                            for c in w.get("topics", [])
+                                                        ],
+                                                        "author_keywords": [
+                                                            kw.get("display_name", "")
+                                                            for kw in w.get(
+                                                                "keywords", []
+                                                            )
+                                                        ],
+                                                        "journal": journal,
+                                                    }
+                                                    oa_works_count += 1
+                                    self.log(
+                                        f"   - Всього OpenAlex робіт: {oa_works_count}"
+                                    )
+                            except Exception as e:
+                                self.log(f"   ! Помилка пошуку автора: {str(e)}")
+                        for i, ws in enumerate(works):
+                            w_title = ws.get("title") or ""
+                            w_doi = (
+                                (ws.get("doi") or "")
+                                .lower()
+                                .replace("https://doi.org/", "")
+                            )
+                            k_oa = re.sub(r"\W+", "", w_title.lower())
 
-                                target_k = None
-                                if w_doi and w_doi in doi_map:
-                                    target_k = doi_map[w_doi]
-                                elif k_oa and k_oa in merged_local:
-                                    target_k = k_oa
+                            target_k = None
+                            if w_doi and w_doi in doi_map:
+                                target_k = doi_map[w_doi]
+                            elif k_oa and k_oa in merged_local:
+                                target_k = k_oa
 
-                                if not self.deep_analysis_var.get():
+                            if not self.deep_analysis_var.get():
+                                pl = ws.get("primary_location") or {}
+                                journal = (pl.get("source") or {}).get(
+                                    "display_name", "-"
+                                ) or "-"
+                                meta = {
+                                    "concepts": [
+                                        c.get("display_name", "")
+                                        for c in ws.get("topics", [])
+                                    ],
+                                    "author_keywords": [
+                                        kw.get("display_name", "")
+                                        for kw in ws.get("keywords", [])
+                                    ],
+                                    "journal": journal,
+                                }
+                                if target_k:
+                                    merged_local[target_k].update(meta)
+                                else:
+                                    merged_local[k_oa] = {
+                                        "title": w_title,
+                                        "year": ws.get("publication_year", 0),
+                                        "doi": w_doi,
+                                        "source": "OpenAlex",
+                                        "manual_keywords": "",
+                                        "abstract": "",
+                                        "authors_full": [],
+                                        **meta,
+                                    }
+                            else:
+                                self.log_status(
+                                    f"Деталі OpenAlex: {a_name}",
+                                    f"Обробка {i + 1}/{len(works)}",
+                                )
+                                try:
+                                    ab = decode_openalex_abstract(
+                                        ws.get("abstract_inverted_index")
+                                    )
                                     pl = ws.get("primary_location") or {}
                                     journal = (pl.get("source") or {}).get(
                                         "display_name", "-"
@@ -1691,12 +2135,32 @@ class MonCouncilProApp:
                                         "concepts": [
                                             c.get("display_name", "")
                                             for c in ws.get("topics", [])
+                                        ]
+                                        or [
+                                            c.get("display_name", "")
+                                            for c in ws.get("concepts", [])
                                         ],
-                                        "author_keywords": [],
+                                        "author_keywords": [
+                                            kw.get("display_name", "")
+                                            for kw in ws.get("keywords", [])
+                                        ],
+                                        "abstract": ab,
                                         "journal": journal,
+                                        "authors_full": [
+                                            a.get("author", {}).get(
+                                                "display_name", "Невідомо"
+                                            )
+                                            for a in ws.get("authorships", [])
+                                        ],
+                                        "url": ws.get("doi") or "",
                                     }
                                     if target_k:
                                         merged_local[target_k].update(meta)
+                                        if (
+                                            "OpenAlex"
+                                            not in merged_local[target_k]["source"]
+                                        ):
+                                            merged_local[target_k]["source"] += " + OA"
                                     else:
                                         merged_local[k_oa] = {
                                             "title": w_title,
@@ -1704,87 +2168,29 @@ class MonCouncilProApp:
                                             "doi": w_doi,
                                             "source": "OpenAlex",
                                             "manual_keywords": "",
-                                            "abstract": "",
-                                            "authors_full": [],
                                             **meta,
                                         }
-                                else:
-                                    self.log_status(
-                                        f"Деталі OpenAlex: {a_name}",
-                                        f"Обробка {i + 1}/{len(works)}",
-                                    )
-                                    try:
-                                        ab = decode_openalex_abstract(
-                                            ws.get("abstract_inverted_index")
-                                        )
-                                        pl = ws.get("primary_location") or {}
-                                        journal = (pl.get("source") or {}).get(
-                                            "display_name", "-"
-                                        ) or "-"
-                                        meta = {
-                                            "concepts": [
-                                                c.get("display_name", "")
-                                                for c in ws.get("topics", [])
-                                            ]
-                                            or [
-                                                c.get("display_name", "")
-                                                for c in ws.get("concepts", [])
-                                            ],
-                                            "author_keywords": [
-                                                kw.get("display_name", "")
-                                                for kw in ws.get("keywords", [])
-                                            ],
-                                            "abstract": ab,
-                                            "journal": journal,
-                                            "authors_full": [
-                                                a.get("author", {}).get(
-                                                    "display_name", "Невідомо"
-                                                )
-                                                for a in ws.get("authorships", [])
-                                            ],
-                                            "url": ws.get("doi") or "",
-                                        }
-                                        if target_k:
-                                            merged_local[target_k].update(meta)
-                                            if (
-                                                "OpenAlex"
-                                                not in merged_local[target_k]["source"]
-                                            ):
-                                                merged_local[target_k]["source"] += (
-                                                    " + OA"
-                                                )
-                                        else:
-                                            merged_local[k_oa] = {
-                                                "title": w_title,
-                                                "year": ws.get("publication_year", 0),
-                                                "doi": w_doi,
-                                                "source": "OpenAlex",
-                                                "manual_keywords": "",
-                                                **meta,
-                                            }
 
-                                        if phd_id:
-                                            for auth in ws.get("authorships", []):
-                                                if (
-                                                    phd_id
-                                                    in (
-                                                        auth.get("author", {}).get(
-                                                            "orcid"
-                                                        )
-                                                        or ""
-                                                    ).lower()
-                                                ):
-                                                    conflict = "Співавтор"
-                                                    if target_k:
-                                                        merged_local[target_k][
-                                                            "conflict"
-                                                        ] = "Співавтор"
-                                                    elif k_oa in merged_local:
-                                                        merged_local[k_oa][
-                                                            "conflict"
-                                                        ] = "Співавтор"
-                                    except Exception as e:
-                                        self.log(f"   ! Помилка OA Item: {str(e)}")
+                                    if phd_id:
+                                        for auth in ws.get("authorships", []):
+                                            if (
+                                                phd_id
+                                                in (
+                                                    auth.get("author", {}).get("orcid")
+                                                    or ""
+                                                ).lower()
+                                            ):
+                                                conflict = "Співавтор"
+                                                if target_k:
+                                                    merged_local[target_k][
+                                                        "conflict"
+                                                    ] = "Співавтор"
+                                                elif k_oa in merged_local:
+                                                    merged_local[k_oa]["conflict"] = (
+                                                        "Співавтор"
+                                                    )
+                                except Exception as e:
+                                    self.log(f"   ! Помилка OA Item: {str(e)}")
                     elif r_l.status_code == 404:
                         self.log(f"   ! Автор не знайдений в OpenAlex (404)")
                     elif r_l.status_code == 429:
@@ -1794,7 +2200,7 @@ class MonCouncilProApp:
                         time.sleep(5)
                         try:
                             r_l = requests.get(
-                                f"https://api.openalex.org/works?filter=author.orcid:https://orcid.org/{orcid}&per-page=200",
+                                f"https://api.openalex.org/works?filter=author.orcid:https://orcid.org/{orcid}{self._openalex_filter()}&per-page=200",
                                 headers=oa_h,
                                 timeout=15,
                             )
@@ -1828,7 +2234,10 @@ class MonCouncilProApp:
                                                 c.get("display_name", "")
                                                 for c in ws.get("topics", [])
                                             ],
-                                            "author_keywords": [],
+                                            "author_keywords": [
+                                                kw.get("display_name", "")
+                                                for kw in ws.get("keywords", [])
+                                            ],
                                             "journal": journal,
                                         }
                                         if target_k:
@@ -1858,6 +2267,65 @@ class MonCouncilProApp:
                     self.log(f"   ! Помилка з'єднання з OpenAlex")
                 except Exception as e:
                     self.log(f"   ! Помилка запиту OA: {str(e)}")
+
+            if a_name != "Невідомо" and (orcid_works_count + oa_works_count) < 20:
+                self.log(f"[{cand_id}] Пошук додаткових робіт за іменем: {a_name}")
+                try:
+                    name_encoded = requests.utils.quote(a_name)
+                    r_name = requests.get(
+                        f"https://api.openalex.org/works?search={name_encoded}{self._openalex_filter()}&per-page=200",
+                        headers=oa_h,
+                        timeout=15,
+                    )
+                    if r_name.status_code == 200:
+                        name_works = r_name.json().get("results", [])
+                        added_count = 0
+                        for ws in name_works:
+                            w_title = ws.get("title") or ""
+                            if not w_title:
+                                continue
+                            w_doi = (
+                                (ws.get("doi") or "")
+                                .lower()
+                                .replace("https://doi.org/", "")
+                            )
+                            k_oa = re.sub(r"\W+", "", w_title.lower())
+                            if k_oa in merged_local:
+                                continue
+                            pl = ws.get("primary_location") or {}
+                            journal = (pl.get("source") or {}).get(
+                                "display_name", "-"
+                            ) or "-"
+                            meta = {
+                                "concepts": [
+                                    c.get("display_name", "")
+                                    for c in ws.get("topics", [])
+                                ],
+                                "author_keywords": [
+                                    kw.get("display_name", "")
+                                    for kw in ws.get("keywords", [])
+                                ],
+                                "journal": journal,
+                            }
+                            merged_local[k_oa] = {
+                                "title": w_title,
+                                "year": ws.get("publication_year", 0),
+                                "doi": w_doi,
+                                "source": "OpenAlex",
+                                "manual_keywords": "",
+                                "abstract": decode_openalex_abstract(
+                                    ws.get("abstract_inverted_index")
+                                ),
+                                "authors_full": [
+                                    a.get("author", {}).get("display_name", "Невідомо")
+                                    for a in ws.get("authorships", [])
+                                ],
+                                **meta,
+                            }
+                            added_count += 1
+                        self.log(f"   - Знайдено ще {added_count} робіт за іменем")
+                except Exception as e:
+                    self.log(f"   ! Помилка пошуку за іменем: {str(e)}")
 
             if not merged_local:
                 if orcid and self.phd_oa_data and self.phd_oa_data.get("topics"):
@@ -1933,6 +2401,13 @@ class MonCouncilProApp:
                                 time.sleep(random.uniform(2, 4))
                         try:
                             bib = w.get("bib", {})
+                            pub_type = bib.get("pub_type", "")
+                            if self.journal_only_var.get() and pub_type not in (
+                                "article",
+                                "book",
+                                "review",
+                            ):
+                                continue
                             t = bib.get("title", "")
                             y = int(bib.get("pub_year", "0"))
                             ab = ""
@@ -1978,6 +2453,9 @@ class MonCouncilProApp:
                             continue
                 except Exception as e:
                     self.log(f"Помилка Scholar: {str(e)}")
+
+            # Centralized enrichment after all fetching
+            self._enrich_papers_with_openalex(merged_local)
 
             # Verify ORCID and GS names match when both are present
             orcid_name_for_verify = None
@@ -2333,7 +2811,7 @@ class MonCouncilProApp:
             top, height=35, wrap=tk.WORD, font=("Arial", 10)
         )
         txt.pack(padx=15, fill="both", expand=True)
-        c = f"АВТОР: {self.all_candidates[p['cand_id']]['name']}\nРІК: {p['year']} | БАЛИ: {p['score']}\nДЖЕРЕЛО: {p['source']} | ЖУРНАЛ: {p.get('journal', '-')}\n"
+        c = f"АВТОР: {self.all_candidates[p['cand_id']]['name']}\nРІК: {p['year']} | БАЛИ: {p['score']}\nДЖЕРЕЛО: {p['source']} | ЖУРНАЛ: {p.get('journal', '-')}\nDOI: {p.get('doi', '-') or '-'}\n"
         c += f"ЗБІГИ: {p.get('matched_details', '-')}\n" + "-" * 60 + "\n"
         c += f"СПІВАВТОРИ: {', '.join(p.get('authors_full', []))}\n\n"
         c += f"КЛЮЧОВІ СЛОВА АВТОРА: {', '.join(p.get('author_keywords', []))}\n"
@@ -2368,74 +2846,149 @@ class MonCouncilProApp:
         ttk.Button(
             top,
             text="Відкрити в браузері",
-            command=lambda: webbrowser.open(p["url"]) if p["url"] else None,
+            command=lambda: webbrowser.open(p.get("url", "")) if p.get("url") else None,
         ).pack(pady=5)
 
-    def open_add_manual_paper(self):
+    def open_add_manual_paper(self, prefill_url=None, preselect_cand=None):
         if not self.all_candidates:
             return
 
         top = tk.Toplevel(self.root)
-        top.title("Додати статтю вручну")
-        top.geometry("650x600")
+        top.title("Додати статтю" if not prefill_url else "Імпорт статті з OpenAlex")
+        top.geometry("600x700")
 
-        main_frame = ttk.Frame(top, padding="15")
+        main_frame = ttk.Frame(top, padding="10")
         main_frame.pack(fill="both", expand=True)
 
-        author_frame = ttk.LabelFrame(main_frame, text="Автор", padding="10")
-        author_frame.pack(fill="x", pady=(0, 10))
+        author_frame = ttk.LabelFrame(main_frame, text="Автор", padding="5")
+        author_frame.pack(fill="x", pady=(0, 5))
 
         cand_var = tk.StringVar()
         cids_list = list(self.all_candidates.keys())
-        if self.current_cand_filter and self.current_cand_filter in cids_list:
+        cand_names = [self.all_candidates[cid]["name"] for cid in cids_list]
+        default_idx = 0
+        if preselect_cand and preselect_cand in cids_list:
+            default_idx = cids_list.index(preselect_cand)
+        elif self.current_cand_filter and self.current_cand_filter in cids_list:
             default_idx = cids_list.index(self.current_cand_filter)
-        else:
-            default_idx = 0
-        cb = ttk.Combobox(
-            author_frame, textvariable=cand_var, state="readonly", width=60
-        )
-        cb["values"] = [self.all_candidates[cid]["name"] for cid in cids_list]
-        cb.pack()
+
+        cb = ttk.Combobox(author_frame, textvariable=cand_var, state="readonly")
+        cb["values"] = cand_names
+        cb.pack(fill="x")
         cb.current(default_idx)
 
-        info_frame = ttk.LabelFrame(main_frame, text="Основна інформація", padding="10")
-        info_frame.pack(fill="x", pady=(0, 10))
+        info_frame = ttk.LabelFrame(main_frame, text="Основна інформація", padding="5")
+        info_frame.pack(fill="x", pady=(0, 5))
 
-        ttk.Label(info_frame, text="Назва статті:").pack(anchor="w")
-        title_box = tk.Text(info_frame, height=3, width=70, undo=True)
-        title_box.pack(pady=5)
+        ttk.Label(info_frame, text="Назва:").pack(anchor="w")
+        title_box = tk.Text(info_frame, height=2, undo=True, font=("Arial", 10))
+        title_box.pack(fill="x")
         title_box.bind("<<Undo>>", lambda e: title_box.edit_undo())
 
         row_frame = ttk.Frame(info_frame)
-        row_frame.pack(fill="x", pady=5)
+        row_frame.pack(fill="x", pady=2)
         ttk.Label(row_frame, text="Рік:").pack(side="left")
         y_ent = ttk.Entry(row_frame, width=8)
-        y_ent.pack(side="left", padx=(0, 20))
+        y_ent.pack(side="left", padx=(0, 10))
         ttk.Label(row_frame, text="Журнал:").pack(side="left")
-        j_ent = ttk.Entry(row_frame, width=35)
+        j_ent = ttk.Entry(row_frame)
         j_ent.pack(side="left", fill="x", expand=True)
 
         url_row_frame = ttk.Frame(info_frame)
-        url_row_frame.pack(fill="x", pady=5)
-        ttk.Label(url_row_frame, text="DOI/URL:").pack(side="left")
-        url_ent = ttk.Entry(url_row_frame, width=50)
-        url_ent.pack(side="left", fill="x", expand=True)
+        url_row_frame.pack(fill="x", pady=2)
+        ttk.Label(url_row_frame, text="DOI:").pack(side="left")
+        url_ent = ttk.Entry(url_row_frame)
+        url_ent.pack(side="left", fill="x", expand=True, padx=(5, 0))
 
-        kw_frame = ttk.LabelFrame(main_frame, text="Власні ключові слова", padding="10")
-        kw_frame.pack(fill="both", expand=True, pady=(0, 10))
+        oa_frame = ttk.LabelFrame(main_frame, text="Або імпорт з OpenAlex", padding="5")
+        oa_frame.pack(fill="x", pady=(0, 5))
+        oa_row = ttk.Frame(oa_frame)
+        oa_row.pack(fill="x")
+        ttk.Label(oa_row, text="URL:").pack(side="left")
+        oa_ent = ttk.Entry(oa_row)
+        oa_ent.pack(side="left", fill="x", expand=True, padx=5)
+        oa_btn = ttk.Button(oa_row, text="Імпорт")
+        oa_btn.pack(side="left")
 
+        imported_data = {}
+
+        def do_import():
+            nonlocal imported_data
+            url = oa_ent.get().strip()
+            if not url:
+                return
+            oa_btn.config(state="disabled")
+            data = self._import_paper_from_openalex(url)
+            if data:
+                imported_data = data
+                title_box.delete("1.0", tk.END)
+                title_box.insert("1.0", data["title"])
+                y_ent.delete(0, tk.END)
+                y_ent.insert(0, str(data["year"]))
+                j_ent.delete(0, tk.END)
+                j_ent.insert(0, data["journal"])
+                url_ent.delete(0, tk.END)
+                url_ent.insert(0, data["url"])
+                authors_box.delete("1.0", tk.END)
+                if data.get("authors_full"):
+                    authors_box.insert("1.0", ", ".join(data["authors_full"]))
+                mkw_box.delete("1.0", tk.END)
+                kw_list = data["author_keywords"] + data["concepts"]
+                if kw_list:
+                    mkw_box.insert("1.0", ", ".join(kw_list[:10]))
+                abstract_box.delete("1.0", tk.END)
+                if data.get("abstract"):
+                    abstract_box.insert("1.0", data["abstract"])
+                validate_and_update()
+                if not prefill_url:
+                    messagebox.showinfo("OK", "Дані успішно імпортовано!")
+            else:
+                if not prefill_url:
+                    messagebox.showerror(
+                        "Помилка", "Не вдалося отримати дані з OpenAlex"
+                    )
+                else:
+                    messagebox.showerror(
+                        "Помилка",
+                        f"Не вдалося отримати дані з OpenAlex:\n{prefill_url}",
+                    )
+            oa_btn.config(state="normal")
+
+        oa_btn.config(command=do_import)
+
+        if prefill_url:
+            oa_ent.insert(0, prefill_url)
+            top.after(100, do_import)
+
+        authors_frame = ttk.LabelFrame(main_frame, text="Співавтори", padding="5")
+        authors_frame.pack(fill="x", pady=(0, 5))
+        authors_box = tk.Text(authors_frame, height=2, undo=True, font=("Arial", 10))
+        authors_box.pack(fill="x")
+        authors_box.bind("<<Undo>>", lambda e: authors_box.edit_undo())
+
+        kw_frame = ttk.LabelFrame(main_frame, text="Власні ключові слова", padding="5")
+        kw_frame.pack(fill="x", pady=(0, 5))
         ttk.Label(kw_frame, text="Ключові слова (через кому):").pack(anchor="w")
-        mkw_box = tk.Text(kw_frame, height=4, width=70, wrap="word", undo=True)
-        mkw_box.pack(pady=5, fill="both", expand=True)
+        mkw_box = tk.Text(kw_frame, height=2, undo=True, font=("Arial", 10))
+        mkw_box.pack(fill="x")
         mkw_box.bind("<<Undo>>", lambda e: mkw_box.edit_undo())
 
+        abstract_frame = ttk.LabelFrame(main_frame, text="Анотація", padding="5")
+        abstract_frame.pack(fill="x", pady=(0, 5))
+        abstract_scr = scrolledtext.ScrolledText(
+            abstract_frame, height=12, undo=True, font=("Arial", 10)
+        )
+        abstract_scr.pack(fill="x")
+        abstract_scr.bind("<<Undo>>", lambda e: abstract_scr.edit_undo())
+        abstract_box = abstract_scr
+
         btn_frame = ttk.Frame(main_frame)
-        btn_frame.pack(pady=10)
+        btn_frame.pack(pady=(5, 0), fill="x")
         ttk.Button(btn_frame, text="Скасувати", command=top.destroy).pack(
-            side="left", padx=10
+            side="left", padx=5
         )
         save_btn = ttk.Button(btn_frame, text="Зберегти")
-        save_btn.pack(side="left", padx=10)
+        save_btn.pack(side="left", padx=5)
 
         def validate_and_update():
             title = title_box.get("1.0", tk.END).strip()
@@ -2452,29 +3005,41 @@ class MonCouncilProApp:
             y = int(y_ent.get().strip())
             j = j_ent.get().strip()
             url = url_ent.get().strip()
+            authors_text = authors_box.get("1.0", tk.END).strip()
             mkw = mkw_box.get("1.0", tk.END).strip()
+            abstract_text = abstract_box.get("1.0", tk.END).strip()
 
+            authors_list = [a.strip() for a in authors_text.split(",") if a.strip()]
             banned = self.all_candidates[cid].get("banned_keywords", [])
+            source = (
+                imported_data.get("source", "Manual") if imported_data else "Manual"
+            )
             p_d = {
                 "title": t,
                 "year": y,
                 "journal": j or "-",
                 "url": url,
-                "concepts": [],
-                "author_keywords": [],
+                "concepts": imported_data.get("concepts", []) if imported_data else [],
+                "author_keywords": imported_data.get("author_keywords", [])
+                if imported_data
+                else [],
+                "authors_full": authors_list
+                if authors_list
+                else (imported_data.get("authors_full", []) if imported_data else []),
+                "abstract": abstract_text
+                or (imported_data.get("abstract", "") if imported_data else ""),
                 "manual_keywords": mkw,
-                "abstract": "",
-                "source": "Manual",
+                "source": source,
                 "cand_id": cid,
             }
             sc, m = heuristic_score(
                 t,
-                [],
-                [],
+                p_d["concepts"],
+                p_d["author_keywords"],
                 mkw,
                 self.target_keywords,
                 banned_keywords=banned,
-                abstract="",
+                abstract=p_d["abstract"],
             )
             p_d.update(
                 {
