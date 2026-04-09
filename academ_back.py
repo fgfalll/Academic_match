@@ -271,15 +271,19 @@ class MonCouncilProApp:
             wa, text="Кандидати (ORCHID\Google Scholar через кому)", padding="5"
         )
         inf.pack(side="left", fill="both", expand=True, padx=(0, 2))
-        self.candidates_text = tk.Text(inf, height=5)
+        self.candidates_text = tk.Text(inf, height=5, undo=True)
         self.candidates_text.pack(fill="both", expand=True)
         self.candidates_text.insert("1.0", "")
+        self.candidates_text.bind(
+            "<<Undo>>", lambda e: self.candidates_text.edit_undo()
+        )
 
         kwf = ttk.LabelFrame(wa, text="Ключові слова (через кому)", padding="5")
         kwf.pack(side="right", fill="both", expand=True, padx=(2, 0))
-        self.keyword_text = tk.Text(kwf, height=3)
+        self.keyword_text = tk.Text(kwf, height=3, undo=True)
         self.keyword_text.pack(fill="both", expand=True)
         self.keyword_text.insert("1.0", "")
+        self.keyword_text.bind("<<Undo>>", lambda e: self.keyword_text.edit_undo())
         self.keyword_text.bind("<KeyRelease>", self.update_keyword_preview)
         self.keyword_text.bind("<Button-3>", self.show_text_context_menu)
         self.candidates_text.bind("<Button-3>", self.show_text_context_menu)
@@ -303,7 +307,12 @@ class MonCouncilProApp:
         lf = ttk.LabelFrame(self.tab_main, text="Журнал подій", padding="5")
         lf.pack(fill="both", expand=True, padx=5, pady=2)
         self.log_area = scrolledtext.ScrolledText(
-            lf, wrap=tk.WORD, state="disabled", height=3, font=("Consolas", 9)
+            lf,
+            wrap=tk.WORD,
+            state="disabled",
+            height=6,
+            font=("Consolas", 9),
+            undo=True,
         )
         self.log_area.pack(fill="both", expand=True)
 
@@ -392,7 +401,7 @@ class MonCouncilProApp:
 
         self.pm = tk.Menu(self.root, tearoff=0)
         self.tree_pap.bind("<Button-3>", self.show_paper_context_menu)
-        self.tree_pap.bind("<Control-C>", lambda e: self.copy_paper_title())
+        self.tree_pap.bind("<<Copy>>", lambda e: self.copy_paper_title())
 
     def build_advice_tab(self):
         main_frame = ttk.Frame(self.tab_advice)
@@ -464,8 +473,9 @@ class MonCouncilProApp:
         right_panel.pack(side="left", fill="both", expand=True, padx=(5, 0))
 
         self.advice_output = scrolledtext.ScrolledText(
-            right_panel, wrap=tk.WORD, font=("Arial", 10)
+            right_panel, wrap=tk.WORD, font=("Arial", 10), undo=True
         )
+        self.advice_output.bind("<<Undo>>", lambda e: self.advice_output.edit_undo())
         self.advice_output.pack(fill="both", expand=True)
         self.advice_output.config(state="disabled")
 
@@ -1758,9 +1768,10 @@ class MonCouncilProApp:
         kw_frame.pack(fill="both", expand=True, pady=(0, 10))
 
         ttk.Label(kw_frame, text="Ключові слова (через кому):").pack(anchor="w")
-        mkw_box = tk.Text(kw_frame, height=6, width=70, wrap="word")
+        mkw_box = tk.Text(kw_frame, height=6, width=70, wrap="word", undo=True)
         mkw_box.pack(pady=5, fill="both", expand=True)
         mkw_box.insert("1.0", p["manual_keywords"])
+        mkw_box.bind("<<Undo>>", lambda e: mkw_box.edit_undo())
 
         btn_frame = ttk.Frame(main_frame)
         btn_frame.pack(pady=(0, 5))
@@ -1882,8 +1893,8 @@ class MonCouncilProApp:
             m.tk_popup(e.x_root, e.y_root)
 
         txt.bind("<Button-3>", show_txt_menu)
-        txt.bind("<Control-C>", smart_copy)
-        top.bind("<Control-C>", smart_copy)
+        txt.bind("<<Copy>>", smart_copy)
+        top.bind("<<Copy>>", smart_copy)
 
         ttk.Button(top, text="Копіювати назву", command=copy_title).pack(pady=5)
         ttk.Button(
@@ -1923,8 +1934,9 @@ class MonCouncilProApp:
         info_frame.pack(fill="x", pady=(0, 10))
 
         ttk.Label(info_frame, text="Назва статті:").pack(anchor="w")
-        title_box = tk.Text(info_frame, height=3, width=70)
+        title_box = tk.Text(info_frame, height=3, width=70, undo=True)
         title_box.pack(pady=5)
+        title_box.bind("<<Undo>>", lambda e: title_box.edit_undo())
 
         row_frame = ttk.Frame(info_frame)
         row_frame.pack(fill="x", pady=5)
@@ -1945,8 +1957,9 @@ class MonCouncilProApp:
         kw_frame.pack(fill="both", expand=True, pady=(0, 10))
 
         ttk.Label(kw_frame, text="Ключові слова (через кому):").pack(anchor="w")
-        mkw_box = tk.Text(kw_frame, height=4, width=70, wrap="word")
+        mkw_box = tk.Text(kw_frame, height=4, width=70, wrap="word", undo=True)
         mkw_box.pack(pady=5, fill="both", expand=True)
+        mkw_box.bind("<<Undo>>", lambda e: mkw_box.edit_undo())
 
         btn_frame = ttk.Frame(main_frame)
         btn_frame.pack(pady=10)

@@ -2292,7 +2292,7 @@ class AIAdvisorApp:
         provider_combo.bind("<<ComboboxSelected>>", update_default_model)
         key_entry.bind("<KeyRelease>", auto_fetch_models)
         key_entry.bind(
-            "<Control-V>",
+            "<<Paste>>",
             lambda e: [key_entry.after_idle(auto_fetch_models)]
             if key_var.get().strip()
             else None,
@@ -2512,10 +2512,11 @@ class AIAdvisorApp:
         input_frame.pack(fill="x", pady=(3, 0))
 
         self.chat_input = tk.Text(
-            input_frame, height=2, wrap="word", font=("Arial", 10)
+            input_frame, height=2, wrap="word", font=("Arial", 10), undo=True
         )
         self.chat_input.pack(side="left", fill="both", expand=True)
         self.chat_input.bind("<Control-Return>", lambda e: self._send_message())
+        self.chat_input.bind("<<Undo>>", lambda e: self.chat_input.edit_undo())
 
         self.send_btn = ttk.Button(
             input_frame, text="Надіслати", command=self._send_message
@@ -4164,7 +4165,7 @@ dd {
                 ),
             )
 
-        key_entry.bind("<Control-V>", lambda e: (on_paste(), None))
+        key_entry.bind("<<Paste>>", lambda e: (on_paste(), None))
 
         status_label = tk.Label(detail_frame, text="", fg="gray", font=("Arial", 9))
         status_label.pack(anchor="w", pady=(5, 0))
