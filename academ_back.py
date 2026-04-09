@@ -183,10 +183,8 @@ class MonCouncilProApp:
         )
         file_menu.add_separator()
         file_menu.add_command(label="Вихід", command=self.root.quit)
-        self.root.bind("<Control-s>", lambda e: self.save_session())
-        self.root.bind("<Control-o>", lambda e: self.load_session())
-        self.root.bind("<Control-s>", lambda e: self.save_session())
-        self.root.bind("<Control-o>", lambda e: self.load_session())
+        self.root.bind("<Control-S>", lambda e: self.save_session())
+        self.root.bind("<Control-O>", lambda e: self.load_session())
 
         self.notebook = ttk.Notebook(self.root)
         self.notebook.pack(fill="both", expand=True, padx=5, pady=5)
@@ -394,7 +392,7 @@ class MonCouncilProApp:
 
         self.pm = tk.Menu(self.root, tearoff=0)
         self.tree_pap.bind("<Button-3>", self.show_paper_context_menu)
-        self.tree_pap.bind("<Control-c>", lambda e: self.copy_paper_title())
+        self.tree_pap.bind("<Control-C>", lambda e: self.copy_paper_title())
 
     def build_advice_tab(self):
         main_frame = ttk.Frame(self.tab_advice)
@@ -1884,8 +1882,8 @@ class MonCouncilProApp:
             m.tk_popup(e.x_root, e.y_root)
 
         txt.bind("<Button-3>", show_txt_menu)
-        txt.bind("<Control-c>", smart_copy)
-        top.bind("<Control-c>", smart_copy)
+        txt.bind("<Control-C>", smart_copy)
+        top.bind("<Control-C>", smart_copy)
 
         ttk.Button(top, text="Копіювати назву", command=copy_title).pack(pady=5)
         ttk.Button(

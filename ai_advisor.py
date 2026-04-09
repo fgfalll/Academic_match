@@ -2292,7 +2292,7 @@ class AIAdvisorApp:
         provider_combo.bind("<<ComboboxSelected>>", update_default_model)
         key_entry.bind("<KeyRelease>", auto_fetch_models)
         key_entry.bind(
-            "<Control-v>",
+            "<Control-V>",
             lambda e: [key_entry.after_idle(auto_fetch_models)]
             if key_var.get().strip()
             else None,
@@ -4164,7 +4164,7 @@ dd {
                 ),
             )
 
-        key_entry.bind("<Control-v>", lambda e: (on_paste(), None))
+        key_entry.bind("<Control-V>", lambda e: (on_paste(), None))
 
         status_label = tk.Label(detail_frame, text="", fg="gray", font=("Arial", 9))
         status_label.pack(anchor="w", pady=(5, 0))
